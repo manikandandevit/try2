@@ -73,17 +73,13 @@ class ClientAdmin(admin.ModelAdmin):
 
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
-    list_display = ['email', 'get_full_name', 'is_active', 'is_admin', 'created_at']
-    list_filter = ['is_active', 'is_admin', 'created_at', 'updated_at']
-    search_fields = ['email', 'first_name', 'last_name']
+    list_display = ['email', 'name', 'phone', 'is_active', 'created_at']
+    list_filter = ['is_active', 'created_at', 'updated_at']
+    search_fields = ['email', 'name', 'phone']
     readonly_fields = ['created_at', 'updated_at']
     fieldsets = (
         ('User Information', {
-            'fields': ('email', 'first_name', 'last_name', 'is_active')
-        }),
-        ('Permissions', {
-            'fields': ('is_admin', 'permissions'),
-            'description': 'Admin has full access. For regular users, select specific permissions.'
+            'fields': ('email', 'name', 'phone', 'is_active')
         }),
         ('Authentication', {
             'fields': ('password',),
@@ -94,10 +90,6 @@ class UserAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
-    
-    def get_full_name(self, obj):
-        return obj.get_full_name() or '-'
-    get_full_name.short_description = 'Full Name'
 
 
 @admin.register(QuotationSend)

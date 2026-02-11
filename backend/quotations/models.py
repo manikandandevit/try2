@@ -123,11 +123,9 @@ class User(models.Model):
     """Model to store user information with authentication."""
     email = models.EmailField(unique=True, help_text="User Email")
     password = models.CharField(max_length=255, help_text="Hashed Password")
-    first_name = models.CharField(max_length=150, blank=True, null=True, help_text="First Name")
-    last_name = models.CharField(max_length=150, blank=True, null=True, help_text="Last Name")
+    name = models.CharField(max_length=255, help_text="Full Name")
+    phone = models.CharField(max_length=20, help_text="Phone Number")
     is_active = models.BooleanField(default=True, help_text="Active Status")
-    is_admin = models.BooleanField(default=False, help_text="Admin Access - Full permissions")
-    permissions = models.JSONField(default=list, help_text="List of allowed tab IDs (e.g., ['dashboard', 'quotation'])")
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -137,24 +135,7 @@ class User(models.Model):
         verbose_name_plural = 'Users'
     
     def __str__(self):
-        name = self.get_full_name() or self.email
-        return f"{name} ({self.email})"
-    
-    def has_permission(self, tab_id):
-        """Check if user has permission to access a tab."""
-        if self.is_admin:
-            return True
-        return tab_id in (self.permissions or [])
-    
-    def get_full_name(self):
-        """Get full name from first_name and last_name."""
-        if self.first_name and self.last_name:
-            return f"{self.first_name} {self.last_name}"
-        elif self.first_name:
-            return self.first_name
-        elif self.last_name:
-            return self.last_name
-        return None
+        return f"{self.name} ({self.email})"
     
     def set_password(self, raw_password):
         """Hash and set password."""

@@ -27,6 +27,11 @@ urlpatterns = [
     path('api/users/', views.list_users, name='list_users'),
     path('api/users/<int:user_id>/', views.user_detail, name='user_detail'),
     path('api/users/<int:user_id>/reset-password/', views.reset_user_password, name='reset_user_password'),
+    # Master endpoints for frontend
+    path('api/get-all-users/', views.get_all_users, name='get_all_users'),
+    path('api/user/<int:user_id>/', views.get_user_by_id, name='get_user_by_id'),
+    path('api/user/status/<int:user_id>/', views.update_user_status, name='update_user_status'),
+    path('api/get-active-departments/', views.get_active_departments, name='get_active_departments'),
     # Email sending endpoint
     path('api/send-quotation-email/', views.send_quotation_email, name='send_quotation_email'),
     # Dashboard statistics endpoint

@@ -588,6 +588,7 @@ def get_company_login(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 def login(request):
+    print("login request: ", request)
     """Handle login authentication with JWT - validates user credentials against Company or User model."""
     try:
         from .models import Company, User
@@ -619,12 +620,13 @@ def login(request):
             user = User.objects.get(email__iexact=user_email)
             if user.is_active and user.check_password(user_password):
                 # User login successful - generate JWT tokens
+                # Since is_admin and permissions are removed, set defaults
                 access_token = create_access_token(
                     user_email=user.email,
                     user_type='user',
                     user_id=user.id,
-                    is_admin=user.is_admin,
-                    permissions=user.permissions if not user.is_admin else []
+                    is_admin=False,  # All users are regular users now
+                    permissions=[]  # No permissions field in new model
                 )
                 
                 refresh_token = create_refresh_token(
@@ -645,11 +647,10 @@ def login(request):
                     'user': {
                         'email': user.email,
                         'user_type': 'user',
-                        'is_admin': user.is_admin,
-                        'permissions': user.permissions if not user.is_admin else [],
-                        'first_name': user.first_name,
-                        'last_name': user.last_name,
-                        'full_name': user.get_full_name()
+                        'is_admin': False,
+                        'permissions': [],
+                        'name': user.name,
+                        'phone': user.phone
                     }
                 })
         except User.DoesNotExist:
@@ -958,14 +959,15 @@ def check_auth(request):
                         'error': 'User account is inactive'
                     })
                 # User exists and is active - get user name
-                user_name = user.get_full_name() or user.email
-                # Update permissions and admin status from database (in case they changed)
-                is_admin = user.is_admin
-                permissions = user.permissions if not user.is_admin else []
+                user_name = user.name or user.email
+                # Since is_admin and permissions are removed, set defaults
+                is_admin = False
+                permissions = []
                 # Get additional user details for profile
                 user_details = {
-                    'first_name': user.first_name,
-                    'last_name': user.last_name,
+                    'name': user.name,
+                    'email': user.email,
+                    'phone': user.phone,
                     'is_active': user.is_active,
                     'created_at': user.created_at.isoformat() if user.created_at else None,
                     'updated_at': user.updated_at.isoformat() if user.updated_at else None,
@@ -1265,22 +1267,17 @@ def list_users(request):
             if search_query:
                 users = users.filter(
                     Q(email__icontains=search_query) | 
-                    Q(first_name__icontains=search_query) |
-                    Q(last_name__icontains=search_query)
+                    Q(name__icontains=search_query) |
+                    Q(phone__icontains=search_query)
                 )
             
             users_list = [
                 {
                     'id': user.id,
+                    'name': user.name,
                     'email': user.email,
-                    'first_name': user.first_name or '',
-                    'last_name': user.last_name or '',
-                    'full_name': user.get_full_name() or '',
-                    'is_active': user.is_active,
-                    'is_admin': user.is_admin,
-                    'permissions': user.permissions or [],
-                    'created_at': user.created_at.isoformat(),
-                    'updated_at': user.updated_at.isoformat()
+                    'phone': user.phone,
+                    'active': user.is_active,
                 }
                 for user in users
             ]
@@ -1300,11 +1297,9 @@ def list_users(request):
             data = json.loads(request.body)
             email = data.get('email', '').strip()
             password = data.get('password', '').strip()
-            first_name = data.get('first_name', '').strip() or None
-            last_name = data.get('last_name', '').strip() or None
+            name = data.get('name', '').strip()
+            phone = data.get('phone', '').strip()
             is_active = data.get('is_active', True)
-            is_admin = data.get('is_admin', False)
-            permissions = data.get('permissions', [])
             
             # Validation
             if not email:
@@ -1322,15 +1317,15 @@ def list_users(request):
                     'error': 'Password must be at least 6 characters long'
                 }, status=400)
             
-            # Validate permissions
-            if not isinstance(permissions, list):
+            if not name:
                 return JsonResponse({
-                    'error': 'Permissions must be an array'
+                    'error': 'Name is required'
                 }, status=400)
             
-            # If admin, set permissions to empty (admin has all access)
-            if is_admin:
-                permissions = []
+            if not phone:
+                return JsonResponse({
+                    'error': 'Phone is required'
+                }, status=400)
             
             # Check if email already exists
             if User.objects.filter(email=email).exists():
@@ -1342,26 +1337,19 @@ def list_users(request):
             user = User.objects.create(
                 email=email,
                 password=password,  # Will be hashed in save() method
-                first_name=first_name,
-                last_name=last_name,
-                is_active=is_active,
-                is_admin=is_admin,
-                permissions=permissions
+                name=name,
+                phone=phone,
+                is_active=is_active
             )
             
             return JsonResponse({
                 'success': True,
                 'user': {
                     'id': user.id,
+                    'name': user.name,
                     'email': user.email,
-                    'first_name': user.first_name or '',
-                    'last_name': user.last_name or '',
-                    'full_name': user.get_full_name() or '',
-                    'is_active': user.is_active,
-                    'is_admin': user.is_admin,
-                    'permissions': user.permissions or [],
-                    'created_at': user.created_at.isoformat(),
-                    'updated_at': user.updated_at.isoformat()
+                    'phone': user.phone,
+                    'active': user.is_active,
                 }
             }, status=201)
         
@@ -1407,12 +1395,10 @@ def user_detail(request, user_id):
         try:
             data = json.loads(request.body)
             email = data.get('email', '').strip()
-            first_name = data.get('first_name', '').strip() or None
-            last_name = data.get('last_name', '').strip() or None
+            name = data.get('name', '').strip()
+            phone = data.get('phone', '').strip()
+            password = data.get('password', '').strip()
             is_active = data.get('is_active', True)
-            # Ensure is_admin is boolean (handle string 'true'/'false' from frontend)
-            is_admin = bool(data.get('is_admin', False)) if data.get('is_admin') is not None else False
-            permissions = data.get('permissions', [])
             
             # Validation
             if not email:
@@ -1420,10 +1406,14 @@ def user_detail(request, user_id):
                     'error': 'Email is required'
                 }, status=400)
             
-            # Validate permissions
-            if not isinstance(permissions, list):
+            if not name:
                 return JsonResponse({
-                    'error': 'Permissions must be an array'
+                    'error': 'Name is required'
+                }, status=400)
+            
+            if not phone:
+                return JsonResponse({
+                    'error': 'Phone is required'
                 }, status=400)
             
             # Check if email already exists (excluding current user)
@@ -1432,17 +1422,20 @@ def user_detail(request, user_id):
                     'error': 'User with this email already exists'
                 }, status=400)
             
-            # If admin, set permissions to empty (admin has all access)
-            if is_admin:
-                permissions = []
-            
-            # Update user (password is not updated here, use reset_password endpoint)
+            # Update user
             user.email = email
-            user.first_name = first_name
-            user.last_name = last_name
+            user.name = name
+            user.phone = phone
             user.is_active = is_active
-            user.is_admin = bool(is_admin)  # Ensure boolean value
-            user.permissions = permissions
+            
+            # Update password if provided
+            if password:
+                if len(password) < 6:
+                    return JsonResponse({
+                        'error': 'Password must be at least 6 characters long'
+                    }, status=400)
+                user.password = password  # Will be hashed in save() method
+            
             user.save()
             
             # Force refresh from database to ensure changes are saved
@@ -1452,15 +1445,10 @@ def user_detail(request, user_id):
                 'success': True,
                 'user': {
                     'id': user.id,
+                    'name': user.name,
                     'email': user.email,
-                    'first_name': user.first_name or '',
-                    'last_name': user.last_name or '',
-                    'full_name': user.get_full_name() or '',
-                    'is_active': user.is_active,
-                    'is_admin': user.is_admin,
-                    'permissions': user.permissions or [],
-                    'created_at': user.created_at.isoformat(),
-                    'updated_at': user.updated_at.isoformat()
+                    'phone': user.phone,
+                    'active': user.is_active,
                 }
             })
         
@@ -1526,6 +1514,148 @@ def reset_user_password(request, user_id):
     except Exception as e:
         return JsonResponse({
             'error': f'Error resetting password: {str(e)}'
+        }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def get_all_users(request):
+    """Get all users with pagination, search, and active filter."""
+    from .models import User
+    
+    try:
+        # Get query parameters
+        page = int(request.GET.get('page', 1))
+        limit = int(request.GET.get('limit', 10))
+        search = request.GET.get('search', '').strip()
+        is_active = request.GET.get('isActive', '').strip()
+        
+        # Build query
+        users = User.objects.all()
+        
+        # Apply search filter
+        if search:
+            users = users.filter(
+                Q(email__icontains=search) | 
+                Q(name__icontains=search) |
+                Q(phone__icontains=search)
+            )
+        
+        # Apply active filter
+        if is_active.lower() == 'true':
+            users = users.filter(is_active=True)
+        elif is_active.lower() == 'false':
+            users = users.filter(is_active=False)
+        
+        # Get total count
+        total_count = users.count()
+        
+        # Apply pagination
+        offset = (page - 1) * limit
+        users = users[offset:offset + limit]
+        
+        # Build response
+        users_list = [
+            {
+                'id': user.id,
+                'name': user.name,
+                'email': user.email,
+                'phone': user.phone,
+                'active': user.is_active,
+            }
+            for user in users
+        ]
+        
+        return JsonResponse({
+            'success': True,
+            'data': users_list,
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total_count,
+                'pages': (total_count + limit - 1) // limit if limit > 0 else 0
+            }
+        })
+    except Exception as e:
+        return JsonResponse({
+            'error': f'Error fetching users: {str(e)}'
+        }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def get_user_by_id(request, user_id):
+    """Get user by ID."""
+    from .models import User
+    
+    try:
+        user = User.objects.get(id=user_id)
+        return JsonResponse({
+            'success': True,
+            'data': {
+                'id': user.id,
+                'name': user.name,
+                'email': user.email,
+                'phone': user.phone,
+                'active': user.is_active,
+            }
+        })
+    except User.DoesNotExist:
+        return JsonResponse({
+            'error': 'User not found'
+        }, status=404)
+    except Exception as e:
+        return JsonResponse({
+            'error': f'Error fetching user: {str(e)}'
+        }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["PUT"])
+def update_user_status(request, user_id):
+    """Toggle user active status."""
+    from .models import User
+    
+    try:
+        user = User.objects.get(id=user_id)
+        user.is_active = not user.is_active
+        user.save()
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'User {"activated" if user.is_active else "deactivated"} successfully',
+            'data': {
+                'id': user.id,
+                'name': user.name,
+                'email': user.email,
+                'phone': user.phone,
+                'active': user.is_active,
+            }
+        })
+    except User.DoesNotExist:
+        return JsonResponse({
+            'error': 'User not found'
+        }, status=404)
+    except Exception as e:
+        return JsonResponse({
+            'error': f'Error updating user status: {str(e)}'
+        }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def get_active_departments(request):
+    """Get active departments (placeholder - returns empty array for now)."""
+    try:
+        # This is a placeholder endpoint for departments
+        # Can be implemented later if needed
+        return JsonResponse({
+            'success': True,
+            'data': []
+        })
+    except Exception as e:
+        return JsonResponse({
+            'error': f'Error fetching departments: {str(e)}'
         }, status=500)
 
 
@@ -1879,7 +2009,7 @@ def dashboard_stats(request):
                 else:
                     try:
                         send_user = User.objects.get(id=send_user_id)
-                        user_name = send_user.get_full_name() or send_user.email
+                        user_name = send_user.name or send_user.email
                         user_breakdown.append({'user_name': user_name, 'count': send_count})
                     except User.DoesNotExist:
                         user_breakdown.append({'user_name': f'User {send_user_id}', 'count': send_count})
