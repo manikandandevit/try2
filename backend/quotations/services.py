@@ -366,7 +366,13 @@ EVERY response MUST be valid JSON in this exact format:
         "service_name": "",
         "quantity": 0,
         "unit_price": 0,
-        "amount": 0
+        "amount": 0,
+        "key_features": [
+          "Feature 1",
+          "Feature 2",
+          "Feature 3",
+          "Feature 4"
+        ]
       }
     ],
     "subtotal": 0,
@@ -465,19 +471,41 @@ If the user asks to ADD a service:
 1. Check if BOTH quantity and unit_price are provided in the request.
 2. If BOTH are provided:
    - Add the service immediately
+   - ALWAYS include "key_features" array with EXACTLY 4 relevant features for that service
+   - Generate 4 professional, relevant key features based on the service type
    - Recalculate totals
 3. If ANY value is missing:
    - DO NOT modify quotation JSON
    - Ask a clear follow-up question
    - Example: "What quantity and price should I use for [service name]?"
 
-Examples of valid ADD commands:
-- "add service Tiles Work Quantity 5 price 5450" → Extract: service_name="Tiles Work", quantity=5, unit_price=5450
-- "add Tiles Work quantity 5 and price 5450" → Extract: service_name="Tiles Work", quantity=5, unit_price=5450
-- "add service Web Development with quantity 2 and price 25000" → Extract: service_name="Web Development", quantity=2, unit_price=25000
-- "create a Quotation For Website quantity 1 price 45000" → Extract: service_name="Website" (NOT "Quotation For Website")
-- "create Quotation For Mobile App quantity 1 price 50000" → Extract: service_name="Mobile App" (NOT "Quotation For Mobile App")
-- "add Service For Web Development quantity 2 price 25000" → Extract: service_name="Web Development" (NOT "Service For Web Development")
+KEY FEATURES RULES (MANDATORY):
+- EVERY service MUST have a "key_features" array with EXACTLY 4 items
+- Features should be relevant to the service type
+- Features should be professional and descriptive
+- Each feature should be a short string (1-2 sentences max)
+- Generate features based on the service name and context
+
+Examples of valid ADD commands with key features:
+- "add service Tiles Work Quantity 5 price 5450" 
+  → Extract: service_name="Tiles Work", quantity=5, unit_price=5450
+  → Generate 4 relevant features like: ["Premium quality tiles", "Professional installation", "Waterproof finish", "5-year warranty"]
+  
+- "add Tiles Work quantity 5 and price 5450" 
+  → Extract: service_name="Tiles Work", quantity=5, unit_price=5450
+  → Generate 4 relevant features based on tiles work
+  
+- "add service Web Development with quantity 2 and price 25000" 
+  → Extract: service_name="Web Development", quantity=2, unit_price=25000
+  → Generate 4 relevant features like: ["Responsive design", "SEO optimized", "Fast loading speed", "Mobile friendly"]
+  
+- "create a Quotation For Website quantity 1 price 45000" 
+  → Extract: service_name="Website" (NOT "Quotation For Website")
+  → Generate 4 relevant features for website development
+  
+- "create Quotation For Mobile App quantity 1 price 50000" 
+  → Extract: service_name="Mobile App" (NOT "Quotation For Mobile App")
+  → Generate 4 relevant features for mobile app development
 
 CRITICAL SERVICE NAME EXTRACTION RULES:
 - When user says "create a Quotation For X" or "add Service For X", the service name is ONLY "X", NOT "Quotation For X" or "Service For X"
@@ -551,10 +579,11 @@ If user instruction is unclear:
 JSON VALIDATION
 ----------------------------------
 Before returning:
-1. Ensure ALL services have: service_name, quantity, unit_price, amount
-2. Ensure quotation has: services, subtotal, gst_percentage, gst_amount, grand_total
-3. Ensure all numeric values are numbers (not strings)
-4. Ensure amounts are calculated correctly
+1. Ensure ALL services have: service_name, quantity, unit_price, amount, key_features
+2. Ensure key_features is an array with EXACTLY 4 items (strings)
+3. Ensure quotation has: services, subtotal, gst_percentage, gst_amount, shipping, grand_total
+4. Ensure all numeric values are numbers (not strings)
+5. Ensure amounts are calculated correctly
 
 ----------------------------------
 REMEMBER
@@ -1261,6 +1290,16 @@ class QuotationManager:
             
             # Recalculate amount
             service["amount"] = round(unit_price * quantity, 2)
+            
+            # Ensure key_features exists and has exactly 4 items
+            if "key_features" not in service or not isinstance(service["key_features"], list):
+                service["key_features"] = []
+            
+            # Ensure exactly 4 features (pad with empty strings or generate defaults if needed)
+            while len(service["key_features"]) < 4:
+                service["key_features"].append("")
+            # Trim to 4 if more than 4
+            service["key_features"] = service["key_features"][:4]
         
         # Ensure all required quotation fields exist
         if "subtotal" not in quotation:

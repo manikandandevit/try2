@@ -7,8 +7,77 @@ from django.contrib.auth.hashers import make_password, check_password, is_passwo
 import json
 
 
+def generate_quotation_number() -> str:
+    """
+    Generate a company-based sequential quotation number.
+
+    Format:
+    - First 3 letters of company name (A–Z only, uppercased)
+    - Followed by the letter 'Q'
+    - Followed by a 3‑digit running number starting from 001
+
+    Examples (company_name = "MAKLOGISTICS"):
+    - MAKQ001, MAKQ002, MAKQ003, ...
+
+    Behaviour:
+    - Does NOT use SQL AUTO_INCREMENT / database sequence.
+    - Finds existing quotation_number values for this company prefix,
+      takes the highest numeric part, and returns the next one.
+    - Shared across all users in the same company.
+    """
+    # Import here to avoid circular issues at import time
+    from .models import Quotation, Company  # type: ignore
+
+    company = Company.get_company()
+    base_name = (company.company_name or company.brand_name or "").strip().upper()
+
+    # Keep only letters, take first 3, pad if shorter
+    letters_only = "".join(ch for ch in base_name if ch.isalpha())[:3]
+    if not letters_only:
+        letters_only = "COM"
+    elif len(letters_only) < 3:
+        letters_only = (letters_only + "XXX")[:3]
+
+    prefix = f"{letters_only}Q"
+
+    existing_numbers = (
+        Quotation.objects.filter(quotation_number__startswith=prefix)
+        .exclude(quotation_number__isnull=True)
+        .exclude(quotation_number="")
+        .values_list("quotation_number", flat=True)
+    )
+
+    max_seq = 0
+    for num in existing_numbers:
+        if not isinstance(num, str):
+            continue
+        if not num.startswith(prefix):
+            continue
+        numeric_part = num[len(prefix):]
+        try:
+            seq = int(numeric_part)
+            if seq > max_seq:
+                max_seq = seq
+        except (ValueError, TypeError):
+            # Ignore any non-standard values
+            continue
+
+    next_seq = max_seq + 1
+    return f"{prefix}{next_seq:03d}"
+
+
 class Quotation(models.Model):
     """Model to store quotation data."""
+    # User-facing quotation number (NOT SQL auto-increment, not sequential)
+    quotation_number = models.CharField(
+        max_length=50,
+        unique=True,
+        blank=True,
+        null=True,
+        editable=False,
+        db_index=True,
+        help_text="Public quotation number (auto-generated, non-sequential)",
+    )
     quotation_data = models.JSONField(default=dict)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
@@ -16,8 +85,25 @@ class Quotation(models.Model):
     class Meta:
         ordering = ['-created_at']
     
+    def save(self, *args, **kwargs):
+        """
+        On create, generate a non-sequential quotation_number if missing.
+
+        We DO NOT rely on SQL AUTO_INCREMENT here – this uses a custom
+        generator so that numbers are not simple 1,2,3,... sequences.
+        """
+        if not self.quotation_number:
+            # Try until we get a unique number (extremely unlikely to loop)
+            while True:
+                new_number = generate_quotation_number()
+                if not Quotation.objects.filter(quotation_number=new_number).exists():
+                    self.quotation_number = new_number
+                    break
+        super().save(*args, **kwargs)
+    
     def __str__(self):
-        return f"Quotation {self.id} - {self.created_at.strftime('%Y-%m-%d %H:%M')}"
+        # Prefer the public quotation number instead of internal PK
+        return f"Quotation {self.quotation_number} - {self.created_at.strftime('%Y-%m-%d %H:%M')}"
     
     def get_services(self):
         """Get services from quotation data."""

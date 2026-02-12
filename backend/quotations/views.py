@@ -19,6 +19,90 @@ from django.db.models.functions import TruncMonth
 from .services import OpenRouterService, QuotationManager
 
 
+def get_session_keys_for_request(request):
+    """
+    Return per-user/per-login session keys for quotation and conversation history.
+
+    Problem:
+    - Previously we used plain keys like 'quotation' and 'conversation_history'.
+    - If admin and a normal user use the same browser (same Django session cookie),
+      they end up sharing the same quotation + chat history.
+
+    Fix:
+    - Scope session keys by authenticated identity (user_id / company / anonymous).
+    - This keeps each user's chatbot + quotation isolated, even on same machine.
+    """
+    try:
+        user_info = get_user_from_token(request)
+    except Exception:
+        user_info = None
+
+    prefix = "anon"
+
+    if user_info:
+        user_type = user_info.get("user_type", "user")
+        user_id = user_info.get("user_id")
+        user_email = user_info.get("user_email") or "unknown"
+
+        if user_type == "user" and user_id:
+            prefix = f"user_{user_id}"
+        elif user_type == "company":
+            # Single company admin identity
+            prefix = "company"
+        else:
+            # Fallback to email-based prefix
+            safe_email = user_email.replace("@", "_at_").replace(".", "_")
+            prefix = f"user_{safe_email}"
+
+    return {
+        "quotation": f"{prefix}_quotation",
+        "conversation_history": f"{prefix}_conversation_history",
+    }
+
+
+def migrate_legacy_session_for_request(request, session_keys):
+    """
+    One-time migration of old global session keys to per-user keys.
+
+    - Old implementation stored everything under:
+        'quotation' and 'conversation_history'
+    - New implementation uses per-identity keys like:
+        'user_1_quotation', 'company_quotation', etc.
+
+    To avoid leaking data between admin/user1/user2:
+    - For authenticated requests only, if legacy keys exist AND
+      per-user keys do not, move data to the new keys and delete
+      the old globals from this session.
+    - Anonymous sessions keep using the old keys.
+    """
+    try:
+        user_info = get_user_from_token(request)
+    except Exception:
+        user_info = None
+
+    # Only migrate for authenticated users; anonymous keeps legacy keys.
+    if not user_info:
+        return
+
+    legacy_mapping = {
+        "quotation": "quotation",
+        "conversation_history": "conversation_history",
+    }
+
+    for logical_key, legacy_key in legacy_mapping.items():
+        new_key = session_keys.get(logical_key)
+        if not new_key:
+            continue
+
+        if legacy_key in request.session and new_key not in request.session:
+            request.session[new_key] = request.session[legacy_key]
+            # Remove legacy key to prevent future leakage across identities
+            try:
+                del request.session[legacy_key]
+            except KeyError:
+                pass
+
+
 def index(request):
     """API Documentation - List all available endpoints."""
     # Define all API endpoints manually for clarity
@@ -302,6 +386,9 @@ def index(request):
 def chat(request):
     """Handle chat messages and return AI response with updated quotation."""
     try:
+        session_keys = get_session_keys_for_request(request)
+        migrate_legacy_session_for_request(request, session_keys)
+
         data = json.loads(request.body)
         user_message = data.get('message', '').strip()
         
@@ -310,11 +397,11 @@ def chat(request):
                 'error': 'Message is required'
             }, status=400)
         
-        # Get conversation history from session
-        conversation_history = request.session.get('conversation_history', [])
+        # Get conversation history from session (scoped per user)
+        conversation_history = request.session.get(session_keys['conversation_history'], [])
         
-        # Get current quotation from session
-        current_quotation = request.session.get('quotation', None)
+        # Get current quotation from session (scoped per user)
+        current_quotation = request.session.get(session_keys['quotation'], None)
         if current_quotation is None:
             current_quotation = QuotationManager.initialize_quotation()
         
@@ -342,8 +429,8 @@ def chat(request):
             if "issue" not in message.lower() and "error" not in message.lower():
                 message = message + " (Note: Some quotation data was invalid and has been corrected.)"
         
-        # Save to session
-        request.session['quotation'] = updated_quotation
+        # Save to session (scoped per user)
+        request.session[session_keys['quotation']] = updated_quotation
         
         # Update conversation history (keep last 20 messages for better context)
         conversation_history.append({
@@ -355,7 +442,7 @@ def chat(request):
             "content": message
         })
         # Keep last 20 messages (optimized by ConversationOptimizer in service)
-        request.session['conversation_history'] = conversation_history[-20:]
+        request.session[session_keys['conversation_history']] = conversation_history[-20:]
         
         return JsonResponse({
             'response': message,
@@ -375,7 +462,9 @@ def chat(request):
 @require_http_methods(["GET"])
 def get_quotation(request):
     """Get current quotation from session."""
-    quotation = request.session.get('quotation', QuotationManager.initialize_quotation())
+    session_keys = get_session_keys_for_request(request)
+    migrate_legacy_session_for_request(request, session_keys)
+    quotation = request.session.get(session_keys['quotation'], QuotationManager.initialize_quotation())
     return JsonResponse({
         'quotation': quotation
     })
@@ -384,7 +473,9 @@ def get_quotation(request):
 @require_http_methods(["GET"])
 def get_conversation_history(request):
     """Get conversation history from session."""
-    conversation_history = request.session.get('conversation_history', [])
+    session_keys = get_session_keys_for_request(request)
+    migrate_legacy_session_for_request(request, session_keys)
+    conversation_history = request.session.get(session_keys['conversation_history'], [])
     return JsonResponse({
         'messages': conversation_history
     })
@@ -395,6 +486,9 @@ def get_conversation_history(request):
 def sync_conversation_history(request):
     """Sync conversation history from frontend."""
     try:
+        session_keys = get_session_keys_for_request(request)
+        migrate_legacy_session_for_request(request, session_keys)
+
         data = json.loads(request.body)
         messages = data.get('messages', [])
         
@@ -415,10 +509,10 @@ def sync_conversation_history(request):
         # If conversation is reset to just welcome message (1 message), also reset quotation
         # This ensures quotation and conversation stay in sync after reset
         if len(conversation_history) <= 1:
-            request.session['quotation'] = QuotationManager.initialize_quotation()
+            request.session[session_keys['quotation']] = QuotationManager.initialize_quotation()
         
         # Save to session (keep last 50 messages to match frontend)
-        request.session['conversation_history'] = conversation_history[-50:]
+        request.session[session_keys['conversation_history']] = conversation_history[-50:]
         
         return JsonResponse({
             'success': True,
@@ -438,8 +532,10 @@ def sync_conversation_history(request):
 @require_http_methods(["POST"])
 def reset_quotation(request):
     """Reset quotation to empty state."""
-    request.session['quotation'] = QuotationManager.initialize_quotation()
-    request.session['conversation_history'] = []
+    session_keys = get_session_keys_for_request(request)
+    migrate_legacy_session_for_request(request, session_keys)
+    request.session[session_keys['quotation']] = QuotationManager.initialize_quotation()
+    request.session[session_keys['conversation_history']] = []
     return JsonResponse({
         'success': True,
         'quotation': QuotationManager.initialize_quotation()
@@ -451,6 +547,9 @@ def reset_quotation(request):
 def sync_quotation(request):
     """Sync quotation state from frontend (for instant updates)."""
     try:
+        session_keys = get_session_keys_for_request(request)
+        migrate_legacy_session_for_request(request, session_keys)
+
         data = json.loads(request.body)
         quotation = data.get('quotation', None)
         
@@ -469,7 +568,7 @@ def sync_quotation(request):
             }, status=400)
         
         # Save to session
-        request.session['quotation'] = quotation
+        request.session[session_keys['quotation']] = quotation
         
         return JsonResponse({
             'success': True,
