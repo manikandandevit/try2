@@ -5,13 +5,15 @@ from django.contrib import admin
 from django import forms
 from django.shortcuts import redirect
 from django.urls import reverse
-from .models import Quotation, Company, Client, User, QuotationSend
+from .models import Quotation, Company, Client, User, QuotationSend, QuotGenerator
 
 
 @admin.register(Quotation)
 class QuotationAdmin(admin.ModelAdmin):
-    list_display = ['id', 'created_at', 'updated_at', 'get_grand_total_display']
-    readonly_fields = ['created_at', 'updated_at']
+    list_display = ['quotation_number', 'id', 'created_at', 'updated_at', 'get_grand_total_display']
+    readonly_fields = ['quotation_number', 'created_at', 'updated_at']
+    search_fields = ['quotation_number']
+    list_filter = ['created_at', 'updated_at']
     
     def get_grand_total_display(self, obj):
         return f"₹{obj.get_grand_total():,.2f}"
@@ -40,6 +42,10 @@ class CompanyAdmin(admin.ModelAdmin):
     fieldsets = (
         ('Company Information', {
             'fields': ('company_name', 'brand_name', 'tagline', 'phone_number', 'address')
+        }),
+        ('Quotation Number Settings', {
+            'fields': ('quotation_prefix', 'quotation_numberfield'),
+            'description': 'Configure quotation number prefix and track last used number.'
         }),
         ('Login Credentials', {
             'fields': ('email', 'password')
@@ -149,3 +155,9 @@ class QuotationSendAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
+
+
+@admin.register(QuotGenerator)
+class QuotGeneratorAdmin(admin.ModelAdmin):
+    list_display = ['prefix', 'numberfield']
+    search_fields = ['prefix']

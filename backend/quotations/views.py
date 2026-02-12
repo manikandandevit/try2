@@ -103,6 +103,33 @@ def migrate_legacy_session_for_request(request, session_keys):
                 pass
 
 
+def ensure_quotation_number(quotation):
+    """
+    Ensure quotation has a quotation_number for preview.
+    
+    CRITICAL: Once a quotation has a quotation_number, it NEVER changes.
+    This ensures one quotation = one permanent number for its entire lifetime.
+
+    Uses generate_quotation_number() from models so that:
+    - The number is reserved globally (via Company.quotation_numberfield)
+    - All users (admin / user1 / user2) see unique, sequential numbers
+    - Once assigned, the number is permanent and never regenerated
+    """
+    # If quotation already has a number, NEVER change it - return as is
+    if quotation.get('quotation_number'):
+        return quotation
+    
+    # Only generate if quotation_number is completely missing
+    # Import here to avoid circular imports
+    from .models import generate_quotation_number
+
+    # Reserve the next global quotation number (this updates Company)
+    # This number will be permanent for this quotation
+    next_number = generate_quotation_number()
+    quotation['quotation_number'] = next_number
+    return quotation
+
+
 def index(request):
     """API Documentation - List all available endpoints."""
     # Define all API endpoints manually for clarity
@@ -405,10 +432,16 @@ def chat(request):
         if current_quotation is None:
             current_quotation = QuotationManager.initialize_quotation()
         
+        # CRITICAL: Preserve quotation_number if it exists - it's permanent
+        existing_quotation_number = current_quotation.get('quotation_number')
+        
         # If conversation was reset (only welcome message or very short), ensure quotation is fresh
         # This prevents old quotation data from being used after reset
         if len(conversation_history) <= 1:
             current_quotation = QuotationManager.initialize_quotation()
+            # But preserve quotation_number if it existed (user might be editing existing quotation)
+            if existing_quotation_number:
+                current_quotation['quotation_number'] = existing_quotation_number
         
         # Process message with AI
         openrouter_service = OpenRouterService()
@@ -418,16 +451,30 @@ def chat(request):
             conversation_history=conversation_history
         )
         
+        # CRITICAL: Preserve quotation_number from current_quotation if updated_quotation lost it
+        if existing_quotation_number and not updated_quotation.get('quotation_number'):
+            updated_quotation['quotation_number'] = existing_quotation_number
+        
         # Normalize and validate quotation (already done in process_user_message, but do it again for safety)
         updated_quotation = QuotationManager.normalize_quotation(updated_quotation)
+        
+        # CRITICAL: Preserve quotation_number again after normalization (in case it was lost)
+        if existing_quotation_number and not updated_quotation.get('quotation_number'):
+            updated_quotation['quotation_number'] = existing_quotation_number
         
         # Validate after normalization
         if not QuotationManager.validate_quotation(updated_quotation):
             # If still invalid after normalization, keep current quotation
             updated_quotation = QuotationManager.normalize_quotation(current_quotation)
+            # Preserve quotation_number
+            if existing_quotation_number:
+                updated_quotation['quotation_number'] = existing_quotation_number
             # Update message to indicate issue
             if "issue" not in message.lower() and "error" not in message.lower():
                 message = message + " (Note: Some quotation data was invalid and has been corrected.)"
+        
+        # Ensure quotation_number is present for preview (only generates if completely missing)
+        updated_quotation = ensure_quotation_number(updated_quotation)
         
         # Save to session (scoped per user)
         request.session[session_keys['quotation']] = updated_quotation
@@ -465,9 +512,45 @@ def get_quotation(request):
     session_keys = get_session_keys_for_request(request)
     migrate_legacy_session_for_request(request, session_keys)
     quotation = request.session.get(session_keys['quotation'], QuotationManager.initialize_quotation())
+    
+    # Ensure quotation_number is present for preview
+    quotation = ensure_quotation_number(quotation)
+    
     return JsonResponse({
         'quotation': quotation
     })
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def get_quotation_by_id(request, quotation_id):
+    """Get quotation by ID from database."""
+    try:
+        from .models import Quotation
+        
+        quotation_obj = Quotation.objects.get(id=quotation_id)
+        quotation_data = quotation_obj.quotation_data or {}
+        
+        # Add quotation_number and other metadata
+        quotation_data['quotation_number'] = quotation_obj.quotation_number
+        quotation_data['id'] = quotation_obj.id
+        quotation_data['created_at'] = quotation_obj.created_at.isoformat() if quotation_obj.created_at else None
+        quotation_data['updated_at'] = quotation_obj.updated_at.isoformat() if quotation_obj.updated_at else None
+        
+        return JsonResponse({
+            'success': True,
+            'quotation': quotation_data
+        })
+    except Quotation.DoesNotExist:
+        return JsonResponse({
+            'success': False,
+            'error': 'Quotation not found'
+        }, status=404)
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': f'Error fetching quotation: {str(e)}'
+        }, status=500)
 
 
 @require_http_methods(["GET"])
@@ -558,8 +641,20 @@ def sync_quotation(request):
                 'error': 'Quotation data is required'
             }, status=400)
         
+        # CRITICAL: Preserve existing quotation_number from session if it exists
+        # This ensures the number never changes once assigned
+        existing_quotation = request.session.get(session_keys['quotation'], {})
+        existing_number = existing_quotation.get('quotation_number')
+        
         # Normalize and validate quotation
         quotation = QuotationManager.normalize_quotation(quotation)
+        
+        # Preserve quotation_number if it existed before
+        if existing_number and not quotation.get('quotation_number'):
+            quotation['quotation_number'] = existing_number
+        
+        # Ensure quotation has a number (only if completely missing)
+        quotation = ensure_quotation_number(quotation)
         
         # Validate after normalization
         if not QuotationManager.validate_quotation(quotation):
@@ -1481,6 +1576,92 @@ def client_detail(request, client_id):
             }, status=500)
 
 
+@csrf_exempt
+@require_http_methods(["GET"])
+def client_quotations(request, client_id):
+    """Get all quotations for a specific client (both sent and drafts)."""
+    from .models import Client, QuotationSend, Quotation
+    
+    # Get client
+    try:
+        client = Client.objects.get(id=client_id)
+    except Client.DoesNotExist:
+        return JsonResponse({
+            'error': 'Client not found'
+        }, status=404)
+    
+    try:
+        quotations_list = []
+        
+        # Get all draft quotations linked to this customer
+        draft_quotations = Quotation.objects.filter(
+            customer=client,
+            is_draft=True
+        ).order_by('-created_at')
+        
+        for quotation in draft_quotations:
+            quotation_data = quotation.quotation_data or {}
+            grand_total = quotation_data.get('grand_total', 0)
+            status = quotation_data.get('status', 'Draft')
+            
+            quotations_list.append({
+                'id': quotation.id,
+                'quotation_number': quotation.quotation_number,
+                'amount': grand_total,
+                'status': status,
+                'sent_at': None,  # Drafts are not sent
+                'send_type': None,
+            })
+        
+        # Get all quotation sends for this client (by email)
+        quotation_sends = QuotationSend.objects.filter(
+            recipient_email=client.email
+        ).select_related('quotation').order_by('-sent_at')
+        
+        # Track which quotations we've already added (to avoid duplicates)
+        added_quotation_ids = {q['id'] for q in quotations_list}
+        
+        for send in quotation_sends:
+            quotation = send.quotation
+            # Skip if already added as draft
+            if quotation.id in added_quotation_ids:
+                continue
+                
+            quotation_data = quotation.quotation_data or {}
+            
+            # Extract relevant information
+            grand_total = quotation_data.get('grand_total', 0)
+            # If quotation was sent, default status is 'submitted' unless specified otherwise
+            status = quotation_data.get('status', 'submitted')
+            
+            quotations_list.append({
+                'id': quotation.id,
+                'quotation_number': quotation.quotation_number,
+                'amount': grand_total,
+                'status': status,
+                'sent_at': send.sent_at.isoformat(),
+                'send_type': send.send_type,
+            })
+        
+        # Sort by created_at/sent_at (most recent first)
+        quotations_list.sort(key=lambda x: x.get('sent_at') or '', reverse=True)
+        
+        return JsonResponse({
+            'success': True,
+            'client': {
+                'id': client.id,
+                'customer_name': client.customer_name,
+                'email': client.email,
+            },
+            'quotations': quotations_list,
+            'count': len(quotations_list)
+        })
+    except Exception as e:
+        return JsonResponse({
+            'error': f'Error fetching client quotations: {str(e)}'
+            }, status=500)
+
+
 # ============================================
 # USER CRUD OPERATIONS
 # ============================================
@@ -2024,15 +2205,23 @@ Best regards,
             # Track email send in database
             try:
                 from .models import Quotation, QuotationSend
-                # Get quotation from session
-                quotation_data = request.session.get('quotation', None)
+                # Get quotation from session (use per-user session keys)
+                session_keys = get_session_keys_for_request(request)
+                migrate_legacy_session_for_request(request, session_keys)
+                quotation_data = request.session.get(session_keys['quotation'], None)
                 
                 if quotation_data:
-                    # Save quotation to database if not already saved
-                    # Check if we should create a new quotation or use existing one
-                    # For now, create a new quotation record for each send
+                    # Clone data so we don't mutate the session
+                    quotation_data_clean = quotation_data.copy()
+                    
+                    # If preview already reserved a quotation_number, reuse it on save.
+                    # Otherwise, let the model generate a fresh one in save().
+                    quotation_number = quotation_data_clean.get('quotation_number') or None
+                    
+                    # Save quotation to database
                     quotation = Quotation.objects.create(
-                        quotation_data=quotation_data
+                        quotation_number=quotation_number,
+                        quotation_data=quotation_data_clean
                     )
                     
                     # Get user info from token to track who sent this

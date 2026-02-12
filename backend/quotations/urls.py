@@ -10,6 +10,7 @@ urlpatterns = [
     path('', views.index, name='index'),
     path('api/chat/', views.chat, name='chat'),
     path('api/quotation/', views.get_quotation, name='get_quotation'),
+    path('api/quotation/<int:quotation_id>/', views.get_quotation_by_id, name='get_quotation_by_id'),
     path('api/reset/', views.reset_quotation, name='reset_quotation'),
     path('api/sync-quotation/', views.sync_quotation, name='sync_quotation'),
     path('api/conversation-history/', views.get_conversation_history, name='get_conversation_history'),
@@ -23,6 +24,7 @@ urlpatterns = [
     # Client CRUD endpoints
     path('api/clients/', views.list_clients, name='list_clients'),
     path('api/clients/<int:client_id>/', views.client_detail, name='client_detail'),
+    path('api/clients/<int:client_id>/quotations/', views.client_quotations, name='client_quotations'),
     # User CRUD endpoints
     path('api/users/', views.list_users, name='list_users'),
     path('api/users/<int:user_id>/', views.user_detail, name='user_detail'),

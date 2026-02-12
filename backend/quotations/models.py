@@ -11,35 +11,45 @@ def generate_quotation_number() -> str:
     """
     Generate a company-based sequential quotation number.
 
-    Format:
-    - First 3 letters of company name (A–Z only, uppercased)
-    - Followed by the letter 'Q'
-    - Followed by a 3‑digit running number starting from 001
+    Final format (as per latest requirement):
+    - Quotation prefix from Company admin (field: quotation_prefix)
+    - PLUS an auto-incrementing integer from quotation_numberfield
 
-    Examples (company_name = "MAKLOGISTICS"):
-    - MAKQ001, MAKQ002, MAKQ003, ...
+    Example (company_name = "Syngrid", quotation_prefix="SynQ", quotation_numberfield=100):
+    - Next quotation:  SynQ101
+    - Then:            SynQ102, SynQ103, ...
 
     Behaviour:
     - Does NOT use SQL AUTO_INCREMENT / database sequence.
-    - Finds existing quotation_number values for this company prefix,
-      takes the highest numeric part, and returns the next one.
+    - Uses Company.quotation_prefix as the fixed prefix.
+    - Uses the larger of:
+        * Company.quotation_numberfield
+        * Max numeric suffix already used with this prefix in Quotation.quotation_number
+      then returns next = current + 1.
+    - Also updates Company.quotation_numberfield to this new value
+      so it is permanent across admin/user1/user2.
     - Shared across all users in the same company.
     """
     # Import here to avoid circular issues at import time
     from .models import Quotation, Company  # type: ignore
 
     company = Company.get_company()
-    base_name = (company.company_name or company.brand_name or "").strip().upper()
 
-    # Keep only letters, take first 3, pad if shorter
-    letters_only = "".join(ch for ch in base_name if ch.isalpha())[:3]
-    if not letters_only:
-        letters_only = "COM"
-    elif len(letters_only) < 3:
-        letters_only = (letters_only + "XXX")[:3]
+    # 1) Determine prefix
+    # Prefer explicit quotation_prefix from admin; fallback to first 3 letters logic if empty.
+    raw_prefix = (company.quotation_prefix or "").strip()
+    if raw_prefix:
+        prefix = raw_prefix
+    else:
+        base_name = (company.company_name or company.brand_name or "").strip()
+        letters_only = "".join(ch for ch in base_name if ch.isalpha())[:3]
+        if not letters_only:
+            letters_only = "com"
+        elif len(letters_only) < 3:
+            letters_only = (letters_only + "xxx")[:3]
+        prefix = f"{letters_only.lower()}q"
 
-    prefix = f"{letters_only}Q"
-
+    # 2) Find max number already used with this prefix in existing quotations
     existing_numbers = (
         Quotation.objects.filter(quotation_number__startswith=prefix)
         .exclude(quotation_number__isnull=True)
@@ -62,21 +72,33 @@ def generate_quotation_number() -> str:
             # Ignore any non-standard values
             continue
 
-    next_seq = max_seq + 1
-    return f"{prefix}{next_seq:03d}"
+    # 3) Also consider the value stored on the Company itself
+    company_seq = company.quotation_numberfield or 0
+    current_seq = max(max_seq, company_seq)
+
+    # 4) Next number = current + 1
+    next_seq = current_seq + 1
+
+    # 5) Persist the new last-used number back to Company so it's permanent
+    company.quotation_prefix = prefix  # ensure stored prefix matches what we used
+    company.quotation_numberfield = next_seq
+    company.save(update_fields=["quotation_prefix", "quotation_numberfield"])
+
+    # 6) Final quotation number: prefix + integer (no zero padding)
+    return f"{prefix}{next_seq}"
 
 
 class Quotation(models.Model):
     """Model to store quotation data."""
-    # User-facing quotation number (NOT SQL auto-increment, not sequential)
+    # User-facing quotation number (auto-generated, sequential, unique)
     quotation_number = models.CharField(
         max_length=50,
         unique=True,
-        blank=True,
-        null=True,
+        blank=False,
+        null=False,
         editable=False,
         db_index=True,
-        help_text="Public quotation number (auto-generated, non-sequential)",
+        help_text="Public quotation number (auto-generated, sequential)",
     )
     quotation_data = models.JSONField(default=dict)
     created_at = models.DateTimeField(default=timezone.now)
@@ -87,11 +109,16 @@ class Quotation(models.Model):
     
     def save(self, *args, **kwargs):
         """
-        On create, generate a non-sequential quotation_number if missing.
+        On create, generate a sequential quotation_number if missing.
+        
+        CRITICAL: Once a quotation has a quotation_number, it NEVER changes.
+        This ensures one quotation = one permanent number for its entire lifetime.
 
-        We DO NOT rely on SQL AUTO_INCREMENT here – this uses a custom
-        generator so that numbers are not simple 1,2,3,... sequences.
+        Uses a custom generator to ensure unique, sequential quotation numbers
+        based on company prefix and incrementing counter.
         """
+        # Only generate if quotation_number is completely missing
+        # If it already exists, NEVER change it - it's permanent
         if not self.quotation_number:
             # Try until we get a unique number (extremely unlikely to loop)
             while True:
@@ -99,6 +126,7 @@ class Quotation(models.Model):
                 if not Quotation.objects.filter(quotation_number=new_number).exists():
                     self.quotation_number = new_number
                     break
+        # If quotation_number already exists, preserve it - do NOT regenerate
         super().save(*args, **kwargs)
     
     def __str__(self):
@@ -134,6 +162,17 @@ class Company(models.Model):
     openrouter_model = models.CharField(max_length=255, blank=True, null=True, help_text="OpenRouter Model:1", default='google/gemini-flash-1.5:free')
     openrouter_model_2 = models.CharField(max_length=255, blank=True, null=True, help_text="OpenRouter Model:2")
     openrouter_model_3 = models.CharField(max_length=255, blank=True, null=True, help_text="OpenRouter Model:3")
+    # Quotation number generator settings (visible in Company admin)
+    quotation_prefix = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text="Custom quotation prefix (e.g. 'synq'). If empty, first 3 letters of company name are used.",
+    )
+    quotation_numberfield = models.PositiveIntegerField(
+        default=0,
+        help_text="Last used quotation running number (for reference).",
+    )
     login_logo = models.ImageField(upload_to='company_login/', blank=True, null=True, help_text="Login Logo")
     login_image = models.ImageField(upload_to='company_login/', blank=True, null=True, help_text="Login Image")
     quotation_logo = models.ImageField(upload_to='company_quotation/', blank=True, null=True, help_text="Quotation Logo")
@@ -314,3 +353,21 @@ class QuotationSend(models.Model):
     
     def __str__(self):
         return f"{self.get_send_type_display()} send for Quotation {self.quotation.id} - {self.sent_at.strftime('%Y-%m-%d %H:%M')}"
+
+
+class QuotGenerator(models.Model):
+    """
+    Simple model to configure quotation number generation.
+
+    - prefix: free text prefix (e.g. 'synq')
+    - numberfield: last used number or starting number
+    """
+    prefix = models.CharField(max_length=50, help_text="Prefix for quotation numbers (e.g. 'synq')")
+    numberfield = models.PositiveIntegerField(default=0, help_text="Current/last used number")
+    
+    class Meta:
+        verbose_name = "Quotation Number Generator"
+        verbose_name_plural = "Quotation Number Generators"
+    
+    def __str__(self):
+        return f"{self.prefix} - {self.numberfield}"
