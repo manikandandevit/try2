@@ -372,6 +372,7 @@ EVERY response MUST be valid JSON in this exact format:
     "subtotal": 0,
     "gst_percentage": 0,
     "gst_amount": 0,
+    "shipping": 0,
     "grand_total": 0
   }
 }
@@ -436,6 +437,10 @@ Examples:
   → Update gst_percentage to 10
   → Recalculate: gst_amount, grand_total
 
+- "change shipping 500 to 2000" or "change shipping to 2000"
+  → Update shipping to 2000 (a flat rupee amount, NOT a percentage)
+  → Recalculate: grand_total = subtotal + gst_amount + shipping
+
 - "change service name X to Y"
   → Find service with name X, update service_name to Y
   → Keep quantity, unit_price unchanged
@@ -447,7 +452,8 @@ CALCULATION RULES
 amount = quantity × unit_price (for each service)
 subtotal = sum of all service amounts
 gst_amount = (subtotal × gst_percentage) / 100
-grand_total = subtotal + gst_amount
+shipping = flat rupee amount added on top of the subtotal (NOT a percentage)
+grand_total = subtotal + gst_amount + shipping
 
 Round all monetary values to 2 decimal places.
 
@@ -1073,12 +1079,13 @@ class QuotationManager:
             "subtotal": 0,
             "gst_percentage": 0,
             "gst_amount": 0,
+            "shipping": 0,
             "grand_total": 0
         }
     
     @staticmethod
     def calculate_totals(quotation: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate subtotal, GST, and grand_total from services."""
+        """Calculate subtotal, GST, shipping, and grand_total from services."""
         services = quotation.get("services", [])
         
         # Recalculate amounts for each service
@@ -1131,7 +1138,19 @@ class QuotationManager:
             gst_amount = 0
         
         quotation["gst_amount"] = round(gst_amount, 2)
-        quotation["grand_total"] = round(subtotal + gst_amount, 2)
+
+        # Normalize shipping (flat amount, not percentage)
+        shipping = quotation.get("shipping", 0) or 0
+        try:
+            shipping = float(shipping)
+        except (ValueError, TypeError):
+            shipping = 0.0
+        if shipping < 0:
+            shipping = 0.0
+        quotation["shipping"] = round(shipping, 2)
+
+        # Grand total includes subtotal + GST + shipping
+        quotation["grand_total"] = round(subtotal + gst_amount + shipping, 2)
         
         return quotation
     
@@ -1250,6 +1269,8 @@ class QuotationManager:
             quotation["gst_percentage"] = 0
         if "gst_amount" not in quotation:
             quotation["gst_amount"] = 0
+        if "shipping" not in quotation:
+            quotation["shipping"] = 0
         if "grand_total" not in quotation:
             quotation["grand_total"] = 0
         
