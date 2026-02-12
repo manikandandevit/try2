@@ -2,6 +2,9 @@
 Admin configuration for quotations app.
 """
 from django.contrib import admin
+from django import forms
+from django.shortcuts import redirect
+from django.urls import reverse
 from .models import Quotation, Company, Client, User, QuotationSend
 
 
@@ -15,13 +18,29 @@ class QuotationAdmin(admin.ModelAdmin):
     get_grand_total_display.short_description = 'Grand Total'
 
 
+class CompanyAdminForm(forms.ModelForm):
+    """Custom form for Company admin with custom field labels."""
+    class Meta:
+        model = Company
+        fields = '__all__'
+        labels = {
+            'openrouter_model': 'Openrouter model:1',
+            'openrouter_model_2': 'Openrouter model:2',
+            'openrouter_model_3': 'Openrouter model:3',
+        }
+
+
 @admin.register(Company)
 class CompanyAdmin(admin.ModelAdmin):
+    form = CompanyAdminForm
     list_display = ['email', 'sendemail', 'created_at', 'updated_at']
     list_filter = ['created_at', 'updated_at']
     search_fields = ['email', 'sendemail']
     readonly_fields = ['created_at', 'updated_at']
     fieldsets = (
+        ('Company Information', {
+            'fields': ('company_name', 'brand_name', 'tagline', 'phone_number', 'address')
+        }),
         ('Login Credentials', {
             'fields': ('email', 'password')
         }),
@@ -33,6 +52,10 @@ class CompanyAdmin(admin.ModelAdmin):
             'fields': ('sendnumber',),
             'description': 'WhatsApp number for sending quotations via WhatsApp'
         }),
+        ('OpenRouter API Settings', {
+            'fields': ('openrouter_api_key', 'openrouter_model', 'openrouter_model_2', 'openrouter_model_3'),
+            'description': 'OpenRouter API configuration for AI features'
+        }),
         ('Images', {
             'fields': ('login_logo', 'login_image', 'quotation_logo'),
             'description': 'Login images and quotation header logo'
@@ -43,8 +66,26 @@ class CompanyAdmin(admin.ModelAdmin):
         }),
     )
     
+    def get_queryset(self, request):
+        """Limit queryset to only one company - the first one."""
+        qs = super().get_queryset(request)
+        # Get only the first company if any exists
+        if qs.exists():
+            first_company = qs.first()
+            return qs.filter(pk=first_company.pk)
+        return qs
+    
+    def changelist_view(self, request, extra_context=None):
+        """Redirect to change view if company exists, otherwise show add form."""
+        # If a company exists, redirect to its change page (edit form)
+        company = Company.objects.first()
+        if company:
+            return redirect(reverse('admin:quotations_company_change', args=[company.pk]))
+        # If no company exists, show the changelist (which will show add button)
+        return super().changelist_view(request, extra_context)
+    
     def has_add_permission(self, request):
-        """Prevent adding multiple companies - only one allowed."""
+        """Allow adding company details only if no company exists - single company only."""
         if Company.objects.exists():
             return False
         return super().has_add_permission(request)

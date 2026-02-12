@@ -3,7 +3,7 @@ Models for quotations app.
 """
 from django.db import models
 from django.utils import timezone
-from django.contrib.auth.hashers import make_password, check_password
+from django.contrib.auth.hashers import make_password, check_password, is_password_usable
 import json
 
 
@@ -35,6 +35,7 @@ class Quotation(models.Model):
 class Company(models.Model):
     """Model to store single company login credentials and images."""
     company_name = models.CharField(max_length=255, blank=True, null=True, help_text="Company Name")
+    brand_name = models.CharField(max_length=255, blank=True, null=True, help_text="Brand Name")
     email = models.EmailField(help_text="Company Email")
     password = models.CharField(max_length=255, help_text="Company Password")
     tagline = models.CharField(max_length=255, blank=True, null=True, help_text="Company Tagline")
@@ -44,7 +45,9 @@ class Company(models.Model):
     sendpassword = models.CharField(max_length=255, blank=True, null=True, help_text="Send Email Password")
     sendnumber = models.CharField(max_length=20, blank=True, null=True, help_text="Send WhatsApp Number")
     openrouter_api_key = models.CharField(max_length=500, blank=True, null=True, help_text="OpenRouter API Key")
-    openrouter_model = models.CharField(max_length=255, blank=True, null=True, help_text="OpenRouter Model Name", default='google/gemini-flash-1.5:free')
+    openrouter_model = models.CharField(max_length=255, blank=True, null=True, help_text="OpenRouter Model:1", default='google/gemini-flash-1.5:free')
+    openrouter_model_2 = models.CharField(max_length=255, blank=True, null=True, help_text="OpenRouter Model:2")
+    openrouter_model_3 = models.CharField(max_length=255, blank=True, null=True, help_text="OpenRouter Model:3")
     login_logo = models.ImageField(upload_to='company_login/', blank=True, null=True, help_text="Login Logo")
     login_image = models.ImageField(upload_to='company_login/', blank=True, null=True, help_text="Login Image")
     quotation_logo = models.ImageField(upload_to='company_quotation/', blank=True, null=True, help_text="Quotation Logo")
@@ -63,6 +66,7 @@ class Company(models.Model):
             # Get the existing company and update it
             existing_company = Company.objects.first()
             existing_company.company_name = self.company_name
+            existing_company.brand_name = self.brand_name
             existing_company.email = self.email
             existing_company.password = self.password
             existing_company.tagline = self.tagline
@@ -73,6 +77,8 @@ class Company(models.Model):
             existing_company.sendnumber = self.sendnumber
             existing_company.openrouter_api_key = self.openrouter_api_key
             existing_company.openrouter_model = self.openrouter_model
+            existing_company.openrouter_model_2 = self.openrouter_model_2
+            existing_company.openrouter_model_3 = self.openrouter_model_3
             existing_company.login_logo = self.login_logo
             existing_company.login_image = self.login_image
             existing_company.quotation_logo = self.quotation_logo
@@ -147,9 +153,15 @@ class User(models.Model):
     
     def save(self, *args, **kwargs):
         """Override save to hash password if it's not already hashed."""
-        # Check if password is already hashed (starts with pbkdf2_sha256$ or similar)
-        if self.password and not self.password.startswith('pbkdf2_'):
-            self.password = make_password(self.password)
+        # Check if password is already hashed
+        # Django password hashes typically start with algorithm identifiers like 'pbkdf2_sha256$'
+        if self.password:
+            # Check if password is already hashed (hashed passwords start with algorithm identifiers)
+            # is_password_usable returns True if password is already hashed
+            if not is_password_usable(self.password):
+                # Password is not hashed (raw password), hash it
+                print(f"Auto-hashing password for user: {self.email}")
+                self.password = make_password(self.password)
         super().save(*args, **kwargs)
 
 

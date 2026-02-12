@@ -545,6 +545,7 @@ def get_company_login(request):
         # Default values
         login_data = {
             'email': '',
+            'brand_name': '',
             'login_logo_url': None,
             'login_image_url': None
         }
@@ -553,33 +554,43 @@ def get_company_login(request):
         
         if company:
             login_data['email'] = company.email or login_data['email']
+            login_data['brand_name'] = company.brand_name or login_data['brand_name']
             
             # Get login logo URL
             if company.login_logo:
                 try:
                     logo_url = company.login_logo.url
-                    if logo_url and logo_url.strip():
+                    if logo_url:
                         logo_url = logo_url.strip()
-                        if not logo_url.startswith('/'):
+                        # Django's .url already returns the correct path like /media/company_login/file.jpg
+                        # Just ensure it starts with / for relative paths
+                        if logo_url and not logo_url.startswith('http') and not logo_url.startswith('/'):
                             logo_url = '/' + logo_url
                         login_data['login_logo_url'] = logo_url
-                except (AttributeError, ValueError):
+                except Exception as e:
+                    print(f"Error getting login logo URL: {str(e)}")
                     login_data['login_logo_url'] = None
             
             # Get login image URL
             if company.login_image:
                 try:
                     image_url = company.login_image.url
-                    if image_url and image_url.strip():
+                    if image_url:
                         image_url = image_url.strip()
-                        if not image_url.startswith('/'):
+                        # Django's .url already returns the correct path like /media/company_login/file.jpg
+                        # Just ensure it starts with / for relative paths
+                        if image_url and not image_url.startswith('http') and not image_url.startswith('/'):
                             image_url = '/' + image_url
                         login_data['login_image_url'] = image_url
-                except (AttributeError, ValueError):
+                except Exception as e:
+                    print(f"Error getting login image URL: {str(e)}")
                     login_data['login_image_url'] = None
         
         return JsonResponse(login_data)
     except Exception as e:
+        import traceback
+        print(f"Error in get_company_login: {str(e)}")
+        print(traceback.format_exc())
         return JsonResponse({
             'error': f'Error fetching company login data: {str(e)}'
         }, status=500)
@@ -598,9 +609,27 @@ def login(request):
         )
         
         # Parse request data
-        data = json.loads(request.body)
+        if not request.body:
+            print("Empty request body")
+            return JsonResponse({
+                'success': False,
+                'error': 'Request body is required'
+            }, status=400)
+        
+        try:
+            data = json.loads(request.body)
+            print(f"Login request data: {data}")
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {str(e)}, Body: {request.body}")
+            return JsonResponse({
+                'success': False,
+                'error': 'Invalid JSON in request body'
+            }, status=400)
+        
         user_email = data.get('email', '').strip()
         user_password = data.get('password', '').strip()
+        
+        print(f"Login attempt - Email: {user_email}, Password length: {len(user_password) if user_password else 0}")
         
         # Validate input
         if not user_email:
@@ -617,25 +646,72 @@ def login(request):
         
         # First, try to authenticate as User
         try:
+            print(f"Checking for user with email: {user_email}")
             user = User.objects.get(email__iexact=user_email)
-            if user.is_active and user.check_password(user_password):
+            print(f"User found: {user.email}, Active: {user.is_active}")
+            
+            # User exists, check password and active status
+            if not user.is_active:
+                print(f"User account is inactive: {user_email}")
+                return JsonResponse({
+                    'success': False,
+                    'error': 'Your account is inactive. Please contact administrator.'
+                }, status=401)
+            
+            print(f"Checking password for user: {user_email}")
+            print(f"Stored password hash (first 50 chars): {user.password[:50] if user.password else 'None'}")
+            print(f"Input password length: {len(user_password)}")
+            
+            # Check if password is hashed
+            from django.contrib.auth.hashers import is_password_usable
+            is_hashed = is_password_usable(user.password) if user.password else False
+            print(f"Is password hashed: {is_hashed}")
+            
+            password_valid = user.check_password(user_password)
+            print(f"Password check result: {password_valid}")
+            
+            # If password is not hashed but matches directly, hash it and update
+            if not password_valid and not is_hashed:
+                print(f"Password is not hashed. Checking direct match...")
+                if user.password == user_password:
+                    print(f"Direct match found! Hashing password and updating user...")
+                    user.set_password(user_password)
+                    user.save()
+                    password_valid = True
+                    print(f"Password hashed and updated. Login should work now.")
+                else:
+                    print(f"Direct match also failed. Password mismatch.")
+            
+            if password_valid:
                 # User login successful - generate JWT tokens
-                # Since is_admin and permissions are removed, set defaults
-                access_token = create_access_token(
-                    user_email=user.email,
-                    user_type='user',
-                    user_id=user.id,
-                    is_admin=False,  # All users are regular users now
-                    permissions=[]  # No permissions field in new model
-                )
-                
-                refresh_token = create_refresh_token(
-                    user_email=user.email,
-                    user_type='user',
-                    user_id=user.id,
-                    ip_address=get_client_ip(request),
-                    user_agent=get_user_agent(request)
-                )
+                print(f"Password valid, generating tokens for user: {user.email}")
+                try:
+                    # Since is_admin and permissions are removed, set defaults
+                    access_token = create_access_token(
+                        user_email=user.email,
+                        user_type='user',
+                        user_id=user.id,
+                        is_admin=False,  # All users are regular users now
+                        permissions=[]  # No permissions field in new model
+                    )
+                    print(f"Access token generated successfully")
+                    
+                    refresh_token = create_refresh_token(
+                        user_email=user.email,
+                        user_type='user',
+                        user_id=user.id,
+                        ip_address=get_client_ip(request),
+                        user_agent=get_user_agent(request)
+                    )
+                    print(f"Refresh token generated successfully")
+                except Exception as token_error:
+                    print(f"Error generating tokens: {str(token_error)}")
+                    import traceback
+                    traceback.print_exc()
+                    return JsonResponse({
+                        'success': False,
+                        'error': f'Error generating authentication tokens: {str(token_error)}'
+                    }, status=500)
                 
                 return JsonResponse({
                     'success': True,
@@ -653,40 +729,99 @@ def login(request):
                         'phone': user.phone
                     }
                 })
+            else:
+                # User exists but password is wrong
+                print(f"Password mismatch for user: {user_email}")
+                return JsonResponse({
+                    'success': False,
+                    'error': 'Invalid email or password'
+                }, status=401)
         except User.DoesNotExist:
+            print(f"User not found: {user_email}, trying company login")
+            pass
+        except Exception as user_error:
+            print(f"Error during user authentication: {str(user_error)}")
+            import traceback
+            traceback.print_exc()
+            # Continue to company login
             pass
         
         # If not a user, try company login
-        company = Company.get_company()
+        # Search for company by email (case-insensitive)
+        company = None
+        email_match = False
+        password_match = False
         
-        # Check if company credentials are configured
-        if not company.email or not company.password:
+        try:
+            # First, try to find company by exact email match
+            company = Company.objects.filter(email__iexact=user_email.strip()).first()
+            
+            # If no company found with matching email, try to get any company with email
+            if not company:
+                company = Company.objects.filter(email__isnull=False).exclude(email='').first()
+            
+            # If still no company, use get_company() as fallback
+            if not company:
+                company = Company.get_company()
+            
+            # Check if company credentials are configured
+            if not company or not company.email or not company.password:
+                print(f"Login failed: Company not found or credentials not configured. Email: {user_email}")
+                return JsonResponse({
+                    'success': False,
+                    'error': 'Invalid email or password'
+                }, status=401)
+            
+            # Validate credentials: Compare user input with company credentials
+            email_match = company.email.lower().strip() == user_email.lower().strip()
+            # Compare passwords (strip whitespace to handle edge cases)
+            password_match = (company.password or '').strip() == (user_password or '').strip()
+            
+            # Debug logging
+            print(f"Company login attempt - Email match: {email_match}, Password match: {password_match}")
+            print(f"Company email: {company.email}, User email: {user_email}")
+            print(f"Company password length: {len(company.password) if company.password else 0}, User password length: {len(user_password)}")
+            
+        except Exception as e:
+            # Log the error for debugging
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f'Company login error: {str(e)}', exc_info=True)
+            print(f"Company login exception: {str(e)}")
             return JsonResponse({
                 'success': False,
                 'error': 'Invalid email or password'
             }, status=401)
         
-        # Validate credentials: Compare user input with company credentials
-        email_match = company.email.lower().strip() == user_email.lower().strip()
-        password_match = company.password == user_password
-        
         if email_match and password_match:
             # Company login successful - generate JWT tokens
-            access_token = create_access_token(
-                user_email=company.email,
-                user_type='company',
-                user_id=None,
-                is_admin=True,
-                permissions=[]
-            )
-            
-            refresh_token = create_refresh_token(
-                user_email=company.email,
-                user_type='company',
-                user_id=None,
-                ip_address=get_client_ip(request),
-                user_agent=get_user_agent(request)
-            )
+            print(f"Company credentials valid, generating tokens for: {company.email}")
+            try:
+                access_token = create_access_token(
+                    user_email=company.email,
+                    user_type='company',
+                    user_id=None,
+                    is_admin=True,
+                    permissions=[]
+                )
+                print(f"Company access token generated successfully")
+                
+                refresh_token = create_refresh_token(
+                    user_email=company.email,
+                    user_type='company',
+                    user_id=None,
+                    ip_address=get_client_ip(request),
+                    user_agent=get_user_agent(request)
+                )
+                print(f"Company refresh token generated successfully")
+            except Exception as token_error:
+                print(f"Error generating company tokens: {str(token_error)}")
+                import traceback
+                traceback.print_exc()
+                return JsonResponse({
+                    'success': False,
+                    'error': f'Error generating authentication tokens: {str(token_error)}'
+                }, status=500)
             
             return JsonResponse({
                 'success': True,
@@ -709,20 +844,20 @@ def login(request):
                 'error': 'Invalid email or password'
             }, status=401)
     
-    except json.JSONDecodeError:
-        return JsonResponse({
-            'success': False,
-            'error': 'Invalid JSON in request body'
-        }, status=400)
     except Exception as e:
         # Production-level exception handling
         import logging
+        import traceback
         logger = logging.getLogger(__name__)
         logger.error(f'Login error: {str(e)}', exc_info=True)
         
+        # Print full traceback for debugging
+        print(f"Login exception: {str(e)}")
+        traceback.print_exc()
+        
         return JsonResponse({
             'success': False,
-            'error': 'An unexpected error occurred. Please try again later.'
+            'error': f'An unexpected error occurred: {str(e)}'
         }, status=500)
 
 
@@ -1304,46 +1439,55 @@ def list_users(request):
             # Validation
             if not email:
                 return JsonResponse({
+                    'success': False,
                     'error': 'Email is required'
                 }, status=400)
             
             if not password:
                 return JsonResponse({
+                    'success': False,
                     'error': 'Password is required'
                 }, status=400)
             
             if len(password) < 6:
                 return JsonResponse({
+                    'success': False,
                     'error': 'Password must be at least 6 characters long'
                 }, status=400)
             
             if not name:
                 return JsonResponse({
+                    'success': False,
                     'error': 'Name is required'
                 }, status=400)
             
             if not phone:
                 return JsonResponse({
+                    'success': False,
                     'error': 'Phone is required'
                 }, status=400)
             
             # Check if email already exists
             if User.objects.filter(email=email).exists():
                 return JsonResponse({
+                    'success': False,
                     'error': 'User with this email already exists'
                 }, status=400)
             
             # Create user with hashed password
-            user = User.objects.create(
+            user = User(
                 email=email,
-                password=password,  # Will be hashed in save() method
                 name=name,
                 phone=phone,
                 is_active=is_active
             )
+            # Explicitly hash the password using set_password
+            user.set_password(password)
+            user.save()
             
             return JsonResponse({
                 'success': True,
+                'message': 'User created successfully',
                 'user': {
                     'id': user.id,
                     'name': user.name,
@@ -1355,10 +1499,12 @@ def list_users(request):
         
         except json.JSONDecodeError:
             return JsonResponse({
+                'success': False,
                 'error': 'Invalid JSON in request body'
             }, status=400)
         except Exception as e:
             return JsonResponse({
+                'success': False,
                 'error': f'Error creating user: {str(e)}'
             }, status=500)
 
@@ -1432,9 +1578,11 @@ def user_detail(request, user_id):
             if password:
                 if len(password) < 6:
                     return JsonResponse({
+                        'success': False,
                         'error': 'Password must be at least 6 characters long'
                     }, status=400)
-                user.password = password  # Will be hashed in save() method
+                # Explicitly hash the password using set_password
+                user.set_password(password)
             
             user.save()
             
@@ -1443,6 +1591,7 @@ def user_detail(request, user_id):
             
             return JsonResponse({
                 'success': True,
+                'message': 'User updated successfully',
                 'user': {
                     'id': user.id,
                     'name': user.name,
@@ -2125,7 +2274,9 @@ def get_company_details(request):
             'success': True,
             'company': {
                 'company_name': company.company_name or '',
+                'brand_name': company.brand_name or '',
                 'email': company.email or '',
+                'password': company.password or '',
                 'tagline': company.tagline or '',
                 'phone_number': company.phone_number or '',
                 'address': company.address or '',
@@ -2134,6 +2285,8 @@ def get_company_details(request):
                 'sendnumber': company.sendnumber or '',
                 'openrouter_api_key': company.openrouter_api_key or '',
                 'openrouter_model': company.openrouter_model or 'google/gemini-flash-1.5:free',
+                'openrouter_model_2': company.openrouter_model_2 or '',
+                'openrouter_model_3': company.openrouter_model_3 or '',
                 'login_logo_url': login_logo_url,
                 'login_image_url': login_image_url,
                 'quotation_logo_url': quotation_logo_url,
@@ -2153,7 +2306,7 @@ def get_company_details(request):
 
 
 @csrf_exempt
-@require_http_methods(["PUT"])
+@require_http_methods(["PUT", "POST"])
 def update_company_details(request):
     """Update company details."""
     try:
@@ -2167,12 +2320,31 @@ def update_company_details(request):
                 'error': 'Authentication required'
             }, status=401)
         
-        data = json.loads(request.body)
         company = Company.get_company()
         
-        # Update fields (password is not updated here, use separate endpoint if needed)
+        # Handle both JSON and multipart/form-data
+        # Note: Django's request.POST is only populated for POST requests
+        # For PUT with FormData, we need to use POST method from frontend
+        if request.content_type and 'multipart/form-data' in request.content_type:
+            # Handle form data with file uploads
+            # request.POST should work for POST method
+            data = request.POST
+            files = request.FILES
+        else:
+            # Handle JSON data
+            try:
+                data = json.loads(request.body)
+                files = {}
+            except json.JSONDecodeError:
+                # Fallback to POST data if JSON parsing fails
+                data = request.POST if request.POST else {}
+                files = request.FILES if hasattr(request, 'FILES') else {}
+        
+        # Update fields
         company_name = data.get('company_name', '').strip() or None
+        brand_name = data.get('brand_name', '').strip() or None
         email = data.get('email', '').strip()
+        password = data.get('password', '').strip() or None
         tagline = data.get('tagline', '').strip() or None
         phone_number = data.get('phone_number', '').strip() or None
         address = data.get('address', '').strip() or None
@@ -2181,18 +2353,38 @@ def update_company_details(request):
         sendnumber = data.get('sendnumber', '').strip() or None
         openrouter_api_key = data.get('openrouter_api_key', '').strip() or None
         openrouter_model = data.get('openrouter_model', '').strip() or None
+        openrouter_model_2 = data.get('openrouter_model_2', '').strip() or None
+        openrouter_model_3 = data.get('openrouter_model_3', '').strip() or None
         
-        # Validation
-        if not email:
-            return JsonResponse({
-                'success': False,
-                'error': 'Company email is required'
-            }, status=400)
+        # Handle file uploads
+        if 'login_logo' in files:
+            company.login_logo = files['login_logo']
+        if 'login_image' in files:
+            company.login_image = files['login_image']
+        if 'quotation_logo' in files:
+            company.quotation_logo = files['quotation_logo']
+        
+        # Validation - email is optional in update (keep existing if not provided)
+        # Company should already have an email from get_company(), but validate if updating
+        if email:
+            # Validate email format if provided
+            if '@' not in email or '.' not in email.split('@')[1]:
+                return JsonResponse({
+                    'success': False,
+                    'error': 'Invalid email format'
+                }, status=400)
         
         # Update company - save all fields permanently
         if company_name is not None:
             company.company_name = company_name
-        company.email = email
+        if brand_name is not None:
+            company.brand_name = brand_name
+        # Only update email if provided (Login Credentials not editable in settings)
+        if email:
+            company.email = email
+        # Only update password if provided (Login Credentials not editable in settings)
+        if password is not None:
+            company.password = password
         if tagline is not None:
             company.tagline = tagline
         if phone_number is not None:
@@ -2209,6 +2401,10 @@ def update_company_details(request):
             company.openrouter_api_key = openrouter_api_key
         if openrouter_model is not None:
             company.openrouter_model = openrouter_model
+        if openrouter_model_2 is not None:
+            company.openrouter_model_2 = openrouter_model_2
+        if openrouter_model_3 is not None:
+            company.openrouter_model_3 = openrouter_model_3
         
         # Save to database permanently
         company.save()
@@ -2256,7 +2452,9 @@ def update_company_details(request):
             'message': 'Company details updated successfully',
             'company': {
                 'company_name': company.company_name or '',
+                'brand_name': company.brand_name or '',
                 'email': company.email or '',
+                'password': company.password or '',
                 'tagline': company.tagline or '',
                 'phone_number': company.phone_number or '',
                 'address': company.address or '',
@@ -2265,6 +2463,8 @@ def update_company_details(request):
                 'sendnumber': company.sendnumber or '',
                 'openrouter_api_key': company.openrouter_api_key or '',
                 'openrouter_model': company.openrouter_model or 'google/gemini-flash-1.5:free',
+                'openrouter_model_2': company.openrouter_model_2 or '',
+                'openrouter_model_3': company.openrouter_model_3 or '',
                 'login_logo_url': login_logo_url,
                 'login_image_url': login_image_url,
                 'quotation_logo_url': quotation_logo_url,
