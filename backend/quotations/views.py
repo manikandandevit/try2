@@ -1474,8 +1474,26 @@ def list_clients(request):
                 sent_ids = sent_by_email.get(client.email, set())
                 return len(draft_ids | sent_ids)
 
-            clients_list = [
-                {
+            # Build response with created_by information
+            clients_list = []
+            for client in clients:
+                created_by_name = "-"  # Default for existing customers without created_by info
+                if client.created_by_type == 'company':
+                    try:
+                        from .models import Company
+                        company = Company.get_company()
+                        created_by_name = company.company_name or company.brand_name or 'Company'
+                    except Exception:
+                        created_by_name = 'Company'
+                elif client.created_by_type == 'user' and client.created_by_user_id:
+                    try:
+                        from .models import User
+                        creator_user = User.objects.get(id=client.created_by_user_id)
+                        created_by_name = creator_user.name or creator_user.email or 'User'
+                    except User.DoesNotExist:
+                        created_by_name = 'User'
+                
+                clients_list.append({
                     'id': client.id,
                     'customer_name': client.customer_name,
                     'company_name': client.company_name or '',
@@ -1484,11 +1502,10 @@ def list_clients(request):
                     'address': client.address or '',
                     'is_active': client.is_active,
                     'quotation_sent_count': total_quotations_for_client(client),
+                    'created_by': created_by_name or "-",
                     'created_at': client.created_at.isoformat(),
                     'updated_at': client.updated_at.isoformat()
-                }
-                for client in clients
-            ]
+                })
 
             return JsonResponse({
                 'clients': clients_list,
@@ -1526,6 +1543,20 @@ def list_clients(request):
                     'error': 'Customer with this email already exists'
                 }, status=400)
             
+            # Get creator information from token
+            creator_info = get_user_from_token(request)
+            created_by_type = None
+            created_by_user_id = None
+            
+            if creator_info:
+                user_type = creator_info.get('user_type', 'user')
+                if user_type == 'company':
+                    created_by_type = 'company'
+                    created_by_user_id = None
+                elif user_type == 'user':
+                    created_by_type = 'user'
+                    created_by_user_id = creator_info.get('user_id')
+            
             # Create customer
             client = Client.objects.create(
                 customer_name=customer_name,
@@ -1535,6 +1566,8 @@ def list_clients(request):
                 address=address,
                 # New customers are active by default; can be toggled later
                 is_active=True,
+                created_by_type=created_by_type,
+                created_by_user_id=created_by_user_id
             )
             
             return JsonResponse({
@@ -1833,16 +1866,32 @@ def list_users(request):
                     Q(phone__icontains=search_query)
                 )
             
-            users_list = [
-                {
+            # Build response with created_by information
+            users_list = []
+            for user in users:
+                created_by_name = "-"  # Default for existing users without created_by info
+                if user.created_by_type == 'company':
+                    try:
+                        from .models import Company
+                        company = Company.get_company()
+                        created_by_name = company.company_name or company.brand_name or 'Company'
+                    except Exception:
+                        created_by_name = 'Company'
+                elif user.created_by_type == 'user' and user.created_by_user_id:
+                    try:
+                        creator_user = User.objects.get(id=user.created_by_user_id)
+                        created_by_name = creator_user.name or creator_user.email or 'User'
+                    except User.DoesNotExist:
+                        created_by_name = 'User'
+                
+                users_list.append({
                     'id': user.id,
                     'name': user.name,
                     'email': user.email,
                     'phone': user.phone,
                     'active': user.is_active,
-                }
-                for user in users
-            ]
+                    'created_by': created_by_name or "-",
+                })
             
             return JsonResponse({
                 'users': users_list,
@@ -1901,12 +1950,28 @@ def list_users(request):
                     'error': 'User with this email already exists'
                 }, status=400)
             
+            # Get creator information from token
+            creator_info = get_user_from_token(request)
+            created_by_type = None
+            created_by_user_id = None
+            
+            if creator_info:
+                user_type = creator_info.get('user_type', 'user')
+                if user_type == 'company':
+                    created_by_type = 'company'
+                    created_by_user_id = None
+                elif user_type == 'user':
+                    created_by_type = 'user'
+                    created_by_user_id = creator_info.get('user_id')
+            
             # Create user with hashed password
             user = User(
                 email=email,
                 name=name,
                 phone=phone,
-                is_active=is_active
+                is_active=is_active,
+                created_by_type=created_by_type,
+                created_by_user_id=created_by_user_id
             )
             # Explicitly hash the password using set_password
             user.set_password(password)
@@ -2130,17 +2195,32 @@ def get_all_users(request):
         offset = (page - 1) * limit
         users = users[offset:offset + limit]
         
-        # Build response
-        users_list = [
-            {
+        # Build response with created_by information
+        users_list = []
+        for user in users:
+            created_by_name = "-"  # Default for existing users without created_by info
+            if user.created_by_type == 'company':
+                try:
+                    from .models import Company
+                    company = Company.get_company()
+                    created_by_name = company.company_name or company.brand_name or 'Company'
+                except Exception:
+                    created_by_name = 'Company'
+            elif user.created_by_type == 'user' and user.created_by_user_id:
+                try:
+                    creator_user = User.objects.get(id=user.created_by_user_id)
+                    created_by_name = creator_user.name or creator_user.email or 'User'
+                except User.DoesNotExist:
+                    created_by_name = 'User'
+            
+            users_list.append({
                 'id': user.id,
                 'name': user.name,
                 'email': user.email,
                 'phone': user.phone,
                 'active': user.is_active,
-            }
-            for user in users
-        ]
+                'created_by': created_by_name or "-",
+            })
         
         return JsonResponse({
             'success': True,
@@ -2541,27 +2621,28 @@ def dashboard_stats(request):
             quotation_send_filter['user_id'] = user_id
         
         # KPI Cards - filter based on user type
+        # Base quotation queryset for filtering
         if user_type == 'company':
             # Company admin sees only admin quotations (user_id IS NULL)
-            total_quotations = Quotation.objects.filter(
+            base_quotations = Quotation.objects.filter(
                 sends__user_id__isnull=True
-            ).distinct().count()
+            ).distinct()
             total_customers = Client.objects.count()
             active_customers = Client.objects.filter(is_active=True).count()
             inactive_customers = Client.objects.filter(is_active=False).count()
             total_users = User.objects.filter(is_active=True).count()
         elif user_type == 'user' and is_admin:
             # User with full access sees all quotations (from all users and admin)
-            total_quotations = Quotation.objects.count()
+            base_quotations = Quotation.objects.all()
             total_customers = Client.objects.count()
             active_customers = Client.objects.filter(is_active=True).count()
             inactive_customers = Client.objects.filter(is_active=False).count()
             total_users = User.objects.filter(is_active=True).count()
         elif user_type == 'user' and user_id:
             # Regular users see only their data
-            total_quotations = Quotation.objects.filter(
+            base_quotations = Quotation.objects.filter(
                 sends__user_id=user_id
-            ).distinct().count()
+            ).distinct()
             # Users see all customers (they can send to any customer)
             total_customers = Client.objects.count()
             active_customers = Client.objects.filter(is_active=True).count()
@@ -2570,11 +2651,46 @@ def dashboard_stats(request):
             total_users = QuotationSend.objects.filter(user_id=user_id).count()
         else:
             # Fallback for unauthenticated or invalid users
-            total_quotations = 0
+            base_quotations = Quotation.objects.none()
             total_customers = 0
             active_customers = 0
             inactive_customers = 0
             total_users = 0
+        
+        # Calculate KPIs from base_quotations
+        total_quotations = base_quotations.count()
+        
+        # Calculate Total Draft (count of quotations with status='draft')
+        total_draft = 0
+        for quotation in base_quotations:
+            quotation_data = quotation.quotation_data or {}
+            status = quotation_data.get('status', 'draft').lower()
+            if status == 'draft':
+                total_draft += 1
+        
+        # Calculate Total Submitted Value (sum of grand_total for submitted quotations)
+        total_submitted_value = 0
+        for quotation in base_quotations:
+            quotation_data = quotation.quotation_data or {}
+            status = quotation_data.get('status', 'draft').lower()
+            if status == 'submitted':
+                grand_total = quotation.get_grand_total()
+                try:
+                    total_submitted_value += float(grand_total) if grand_total else 0
+                except (ValueError, TypeError):
+                    pass
+        
+        # Calculate Total Awarded Value (sum of grand_total for awarded quotations)
+        total_awarded_value = 0
+        for quotation in base_quotations:
+            quotation_data = quotation.quotation_data or {}
+            status = quotation_data.get('status', 'draft').lower()
+            if status == 'awarded':
+                grand_total = quotation.get_grand_total()
+                try:
+                    total_awarded_value += float(grand_total) if grand_total else 0
+                except (ValueError, TypeError):
+                    pass
         
         # Monthly Quotation CREATED counts data (for bar chart)
         # Count quotations CREATED (not sent) per month - includes drafts and all statuses
@@ -2725,7 +2841,10 @@ def dashboard_stats(request):
                     'total_customers': total_customers,
                     'active_customers': active_customers,
                     'inactive_customers': inactive_customers,
-                    'total_users': total_users
+                    'total_users': total_users,
+                    'total_draft': total_draft,
+                    'total_submitted_value': round(total_submitted_value, 2),
+                    'total_awarded_value': round(total_awarded_value, 2)
                 },
                 'monthly_sends': monthly_data,
                 'send_breakdown': {

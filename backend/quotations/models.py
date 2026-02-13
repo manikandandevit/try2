@@ -238,6 +238,8 @@ class Client(models.Model):
     email = models.EmailField(help_text="Customer Email")
     address = models.TextField(help_text="Customer Address", blank=True, null=True)
     is_active = models.BooleanField(default=True, help_text="Is this customer active/enabled in dashboard toggle")
+    created_by_type = models.CharField(max_length=20, blank=True, null=True, help_text="Type of creator: 'company' or 'user'")
+    created_by_user_id = models.IntegerField(blank=True, null=True, help_text="ID of user who created this customer (if created by user)")
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -257,6 +259,8 @@ class User(models.Model):
     name = models.CharField(max_length=255, help_text="Full Name")
     phone = models.CharField(max_length=20, help_text="Phone Number")
     is_active = models.BooleanField(default=True, help_text="Active Status")
+    created_by_type = models.CharField(max_length=20, blank=True, null=True, help_text="Type of creator: 'company' or 'user'")
+    created_by_user_id = models.IntegerField(blank=True, null=True, help_text="ID of user who created this user (if created by user)")
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     
