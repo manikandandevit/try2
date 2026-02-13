@@ -11,6 +11,7 @@ urlpatterns = [
     path('api/chat/', views.chat, name='chat'),
     path('api/quotation/', views.get_quotation, name='get_quotation'),
     path('api/quotation/<int:quotation_id>/', views.get_quotation_by_id, name='get_quotation_by_id'),
+    path('api/last-quotation-id/', views.get_last_quotation_id, name='get_last_quotation_id'),
     path('api/reset/', views.reset_quotation, name='reset_quotation'),
     path('api/sync-quotation/', views.sync_quotation, name='sync_quotation'),
     path('api/conversation-history/', views.get_conversation_history, name='get_conversation_history'),
@@ -34,10 +35,14 @@ urlpatterns = [
     path('api/user/<int:user_id>/', views.get_user_by_id, name='get_user_by_id'),
     path('api/user/status/<int:user_id>/', views.update_user_status, name='update_user_status'),
     path('api/get-active-departments/', views.get_active_departments, name='get_active_departments'),
-    # Email sending endpoint
+    # Email/WhatsApp sending endpoints
     path('api/send-quotation-email/', views.send_quotation_email, name='send_quotation_email'),
+    path('api/send-quotation-whatsapp/', views.send_quotation_whatsapp, name='send_quotation_whatsapp'),
+    path('api/quotation/<int:quotation_id>/status/', views.update_quotation_status, name='update_quotation_status'),
     # Dashboard statistics endpoint
     path('api/dashboard-stats/', views.dashboard_stats, name='dashboard_stats'),
+    # Dashboard customer list (chart keela customer list - frontend shape)
+    path('api/dashboard-customers/', views.dashboard_customer_list, name='dashboard_customer_list'),
     # Company settings endpoints
     path('api/company-details/', views.get_company_details, name='get_company_details'),
     path('api/company-details/update/', views.update_company_details, name='update_company_details'),

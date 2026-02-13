@@ -411,39 +411,45 @@ def index(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 def chat(request):
-    """Handle chat messages and return AI response with updated quotation."""
+    """Handle chat messages and return AI response with updated quotation. When quotation_id provided, load/save from DB."""
     try:
+        from .models import Quotation
         session_keys = get_session_keys_for_request(request)
         migrate_legacy_session_for_request(request, session_keys)
 
         data = json.loads(request.body)
         user_message = data.get('message', '').strip()
+        quotation_id = data.get('quotation_id')
         
         if not user_message:
-            return JsonResponse({
-                'error': 'Message is required'
-            }, status=400)
+            return JsonResponse({'error': 'Message is required'}, status=400)
         
-        # Get conversation history from session (scoped per user)
-        conversation_history = request.session.get(session_keys['conversation_history'], [])
+        current_quotation = None
+        conversation_history = []
         
-        # Get current quotation from session (scoped per user)
-        current_quotation = request.session.get(session_keys['quotation'], None)
+        if quotation_id:
+            try:
+                quotation_obj = Quotation.objects.get(id=quotation_id)
+                qdata = quotation_obj.quotation_data or {}
+                current_quotation = dict(qdata)
+                current_quotation['id'] = quotation_obj.id
+                current_quotation['quotation_number'] = quotation_obj.quotation_number
+                conversation_history = qdata.get('conversation_history', []) or []
+            except (Quotation.DoesNotExist, ValueError):
+                pass
+        
         if current_quotation is None:
-            current_quotation = QuotationManager.initialize_quotation()
+            conversation_history = request.session.get(session_keys['conversation_history'], [])
+            current_quotation = request.session.get(session_keys['quotation'], None)
+            if current_quotation is None:
+                current_quotation = QuotationManager.initialize_quotation()
         
-        # CRITICAL: Preserve quotation_number if it exists - it's permanent
         existing_quotation_number = current_quotation.get('quotation_number')
-        
-        # If conversation was reset (only welcome message or very short), ensure quotation is fresh
-        # This prevents old quotation data from being used after reset
-        if len(conversation_history) <= 1:
+        if len(conversation_history) <= 1 and not current_quotation.get('id'):
             current_quotation = QuotationManager.initialize_quotation()
-            # But preserve quotation_number if it existed (user might be editing existing quotation)
             if existing_quotation_number:
                 current_quotation['quotation_number'] = existing_quotation_number
         
-        # Process message with AI
         openrouter_service = OpenRouterService()
         message, updated_quotation = openrouter_service.process_user_message(
             user_message=user_message,
@@ -451,50 +457,42 @@ def chat(request):
             conversation_history=conversation_history
         )
         
-        # CRITICAL: Preserve quotation_number from current_quotation if updated_quotation lost it
-        if existing_quotation_number and not updated_quotation.get('quotation_number'):
+        if existing_quotation_number:
             updated_quotation['quotation_number'] = existing_quotation_number
-        
-        # Normalize and validate quotation (already done in process_user_message, but do it again for safety)
         updated_quotation = QuotationManager.normalize_quotation(updated_quotation)
-        
-        # CRITICAL: Preserve quotation_number again after normalization (in case it was lost)
-        if existing_quotation_number and not updated_quotation.get('quotation_number'):
+        if existing_quotation_number:
             updated_quotation['quotation_number'] = existing_quotation_number
-        
-        # Validate after normalization
         if not QuotationManager.validate_quotation(updated_quotation):
-            # If still invalid after normalization, keep current quotation
             updated_quotation = QuotationManager.normalize_quotation(current_quotation)
-            # Preserve quotation_number
             if existing_quotation_number:
                 updated_quotation['quotation_number'] = existing_quotation_number
-            # Update message to indicate issue
             if "issue" not in message.lower() and "error" not in message.lower():
                 message = message + " (Note: Some quotation data was invalid and has been corrected.)"
-        
-        # Ensure quotation_number is present for preview (only generates if completely missing)
         updated_quotation = ensure_quotation_number(updated_quotation)
         
-        # Save to session (scoped per user)
-        request.session[session_keys['quotation']] = updated_quotation
+        conversation_history = conversation_history + [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": message}
+        ]
+        conversation_history = conversation_history[-50:]
         
-        # Update conversation history (keep last 20 messages for better context)
-        conversation_history.append({
-            "role": "user",
-            "content": user_message
-        })
-        conversation_history.append({
-            "role": "assistant",
-            "content": message
-        })
-        # Keep last 20 messages (optimized by ConversationOptimizer in service)
+        if quotation_id and updated_quotation.get('id'):
+            try:
+                quotation_obj = Quotation.objects.get(id=quotation_id)
+                qdata = dict(quotation_obj.quotation_data or {})
+                for k, v in updated_quotation.items():
+                    if k != 'conversation_history' and k not in ('id', 'created_at', 'updated_at'):
+                        qdata[k] = v
+                qdata['conversation_history'] = conversation_history
+                quotation_obj.quotation_data = qdata
+                quotation_obj.save()
+            except (Quotation.DoesNotExist, ValueError):
+                pass
+        
+        request.session[session_keys['quotation']] = updated_quotation
         request.session[session_keys['conversation_history']] = conversation_history[-20:]
         
-        return JsonResponse({
-            'response': message,
-            'quotation': updated_quotation
-        })
+        return JsonResponse({'response': message, 'quotation': updated_quotation})
     
     except json.JSONDecodeError:
         return JsonResponse({
@@ -554,53 +552,103 @@ def get_quotation_by_id(request, quotation_id):
 
 
 @require_http_methods(["GET"])
+def get_last_quotation_id(request):
+    """
+    Return the last quotation ID the current user worked on.
+    - New user (no quotations): returns null -> frontend shows empty.
+    - Existing user: returns most recent quotation id -> frontend redirects to /quotation/:id.
+    """
+    from .models import Quotation
+    try:
+        user_info = get_user_from_token(request)
+        if not user_info:
+            return JsonResponse({'success': True, 'last_quotation_id': None})
+
+        user_type = user_info.get('user_type', 'company')
+        user_id = user_info.get('user_id')
+
+        if user_type == 'user' and user_id:
+            q = Quotation.objects.filter(
+                quotation_data__created_by_user_id=user_id
+            ).order_by('-updated_at').first()
+        else:
+            # Company admin: quotations created by company (or legacy without user)
+            q = Quotation.objects.filter(
+                quotation_data__created_by_type='company'
+            ).order_by('-updated_at').first()
+            if not q:
+                q = Quotation.objects.filter(
+                    quotation_data__created_by_user_id__isnull=True
+                ).order_by('-updated_at').first()
+            if not q:
+                q = Quotation.objects.order_by('-updated_at').first()
+
+        return JsonResponse({
+            'success': True,
+            'last_quotation_id': q.id if q else None
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': True,
+            'last_quotation_id': None
+        })
+
+
+@require_http_methods(["GET"])
 def get_conversation_history(request):
-    """Get conversation history from session."""
+    """Get conversation history - from Quotation by ID if quotation_id provided, else from session."""
+    from .models import Quotation
+    quotation_id = request.GET.get('quotation_id')
+    if quotation_id:
+        try:
+            quotation_obj = Quotation.objects.get(id=quotation_id)
+            qdata = quotation_obj.quotation_data or {}
+            conversation_history = qdata.get('conversation_history', [])
+            return JsonResponse({'messages': conversation_history})
+        except (Quotation.DoesNotExist, ValueError):
+            return JsonResponse({'messages': []})
     session_keys = get_session_keys_for_request(request)
     migrate_legacy_session_for_request(request, session_keys)
     conversation_history = request.session.get(session_keys['conversation_history'], [])
-    return JsonResponse({
-        'messages': conversation_history
-    })
+    return JsonResponse({'messages': conversation_history})
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 def sync_conversation_history(request):
-    """Sync conversation history from frontend."""
+    """Sync conversation history - to Quotation by ID if quotation_id provided, else to session."""
     try:
-        session_keys = get_session_keys_for_request(request)
-        migrate_legacy_session_for_request(request, session_keys)
-
+        from .models import Quotation
         data = json.loads(request.body)
         messages = data.get('messages', [])
+        quotation_id = data.get('quotation_id')
         
         if not isinstance(messages, list):
-            return JsonResponse({
-                'error': 'Messages must be an array'
-            }, status=400)
+            return JsonResponse({'error': 'Messages must be an array'}, status=400)
         
-        # Convert frontend format to backend format (role/content only)
         conversation_history = []
         for msg in messages:
             if isinstance(msg, dict) and 'role' in msg and 'content' in msg:
-                conversation_history.append({
-                    'role': msg['role'],
-                    'content': msg['content']
-                })
+                conversation_history.append({'role': msg['role'], 'content': msg['content']})
+        conversation_history = conversation_history[-50:]
         
-        # If conversation is reset to just welcome message (1 message), also reset quotation
-        # This ensures quotation and conversation stay in sync after reset
-        if len(conversation_history) <= 1:
-            request.session[session_keys['quotation']] = QuotationManager.initialize_quotation()
+        if quotation_id:
+            try:
+                quotation_obj = Quotation.objects.get(id=quotation_id)
+                qdata = quotation_obj.quotation_data or {}
+                qdata['conversation_history'] = conversation_history
+                quotation_obj.quotation_data = qdata
+                quotation_obj.save()
+            except (Quotation.DoesNotExist, ValueError):
+                pass
+        else:
+            session_keys = get_session_keys_for_request(request)
+            migrate_legacy_session_for_request(request, session_keys)
+            if len(conversation_history) <= 1:
+                request.session[session_keys['quotation']] = QuotationManager.initialize_quotation()
+            request.session[session_keys['conversation_history']] = conversation_history
         
-        # Save to session (keep last 50 messages to match frontend)
-        request.session[session_keys['conversation_history']] = conversation_history[-50:]
-        
-        return JsonResponse({
-            'success': True,
-            'messages': conversation_history
-        })
+        return JsonResponse({'success': True, 'messages': conversation_history})
     
     except json.JSONDecodeError:
         return JsonResponse({
@@ -628,8 +676,9 @@ def reset_quotation(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 def sync_quotation(request):
-    """Sync quotation state from frontend (for instant updates)."""
+    """Sync quotation state from frontend. When quotation has id, persist to DB (auto-save)."""
     try:
+        from .models import Quotation
         session_keys = get_session_keys_for_request(request)
         migrate_legacy_session_for_request(request, session_keys)
 
@@ -637,38 +686,38 @@ def sync_quotation(request):
         quotation = data.get('quotation', None)
         
         if not quotation:
-            return JsonResponse({
-                'error': 'Quotation data is required'
-            }, status=400)
+            return JsonResponse({'error': 'Quotation data is required'}, status=400)
         
-        # CRITICAL: Preserve existing quotation_number from session if it exists
-        # This ensures the number never changes once assigned
         existing_quotation = request.session.get(session_keys['quotation'], {})
         existing_number = existing_quotation.get('quotation_number')
+        payload_has_db_id = quotation.get('id') and quotation.get('quotation_number')
         
-        # Normalize and validate quotation
         quotation = QuotationManager.normalize_quotation(quotation)
-        
-        # Preserve quotation_number if it existed before
-        if existing_number and not quotation.get('quotation_number'):
+        if payload_has_db_id:
+            quotation['quotation_number'] = quotation.get('quotation_number')
+        elif existing_number:
             quotation['quotation_number'] = existing_number
-        
-        # Ensure quotation has a number (only if completely missing)
         quotation = ensure_quotation_number(quotation)
         
-        # Validate after normalization
         if not QuotationManager.validate_quotation(quotation):
-            return JsonResponse({
-                'error': 'Invalid quotation structure'
-            }, status=400)
+            return JsonResponse({'error': 'Invalid quotation structure'}, status=400)
         
-        # Save to session
+        if quotation.get('id'):
+            try:
+                quotation_obj = Quotation.objects.get(id=quotation['id'])
+                qdata = dict(quotation_obj.quotation_data or {})
+                for k, v in quotation.items():
+                    if k not in ('id', 'created_at', 'updated_at', 'conversation_history'):
+                        qdata[k] = v
+                if 'conversation_history' in quotation and isinstance(quotation.get('conversation_history'), list):
+                    qdata['conversation_history'] = quotation['conversation_history']
+                quotation_obj.quotation_data = qdata
+                quotation_obj.save()
+            except (Quotation.DoesNotExist, ValueError):
+                pass
+        
         request.session[session_keys['quotation']] = quotation
-        
-        return JsonResponse({
-            'success': True,
-            'quotation': quotation
-        })
+        return JsonResponse({'success': True, 'quotation': quotation})
     
     except json.JSONDecodeError:
         return JsonResponse({
@@ -1028,7 +1077,8 @@ def login(request):
                     'email': company.email,
                     'user_type': 'company',
                     'is_admin': True,
-                    'permissions': []
+                    'permissions': [],
+                    'company_name': company.company_name or company.brand_name or ''
                 }
             })
         else:
@@ -1319,9 +1369,10 @@ def check_auth(request):
                         'error': 'Company account not found'
                     })
                 user_name = "Admin"
-                # Get company details for admin profile
+                # Get company details for admin profile (company_name for navbar display)
                 user_details = {
                     'company_email': company.email,
+                    'company_name': company.company_name or company.brand_name or '',
                     'send_email': company.sendemail,
                     'send_number': company.sendnumber,
                     'created_at': company.created_at.isoformat() if company.created_at else None,
@@ -1372,14 +1423,14 @@ def check_auth(request):
 @require_http_methods(["GET", "POST"])
 def list_clients(request):
     """List all clients (GET) or create a new client (POST)."""
-    from .models import Client
-    
+    from .models import Client, QuotationSend, Quotation
+
     if request.method == 'GET':
         # List clients with optional search
         try:
             search_query = request.GET.get('search', '').strip()
             clients = Client.objects.all()
-            
+
             # Apply search filter if provided
             if search_query:
                 # Base filters: search across multiple text fields
@@ -1400,7 +1451,27 @@ def list_clients(request):
                     pass
 
                 clients = clients.filter(search_filters)
-            
+
+            # Total unique quotations per customer (same logic as client_quotations)
+            from collections import defaultdict
+            draft_by_client = defaultdict(set)
+            for cid, qid in Quotation.objects.filter(
+                quotation_data__client_id__isnull=False
+            ).values_list('quotation_data__client_id', 'id'):
+                if cid:
+                    draft_by_client[cid].add(qid)
+
+            sent_by_email = defaultdict(set)
+            for email, qid in QuotationSend.objects.filter(
+                recipient_email__isnull=False
+            ).values_list('recipient_email', 'quotation_id'):
+                sent_by_email[email].add(qid)
+
+            def total_quotations_for_client(client):
+                draft_ids = draft_by_client.get(client.id, set())
+                sent_ids = sent_by_email.get(client.email, set())
+                return len(draft_ids | sent_ids)
+
             clients_list = [
                 {
                     'id': client.id,
@@ -1410,12 +1481,13 @@ def list_clients(request):
                     'email': client.email,
                     'address': client.address or '',
                     'is_active': client.is_active,
+                    'quotation_sent_count': total_quotations_for_client(client),
                     'created_at': client.created_at.isoformat(),
                     'updated_at': client.updated_at.isoformat()
                 }
                 for client in clients
             ]
-            
+
             return JsonResponse({
                 'clients': clients_list,
                 'count': len(clients_list)
@@ -1576,12 +1648,32 @@ def client_detail(request, client_id):
             }, status=500)
 
 
+def _get_creator_name(user_type, user_id):
+    """Return display name for who created/sent the quotation: company name or user name."""
+    from .models import Company, User
+    if user_type == 'company' or user_id is None:
+        try:
+            company = Company.get_company()
+            return company.company_name or company.brand_name or 'Company'
+        except Exception:
+            return 'Company'
+    try:
+        uid = int(user_id) if user_id is not None else None
+        if uid is None:
+            company = Company.get_company()
+            return company.company_name or company.brand_name or 'Company'
+        user = User.objects.get(id=uid)
+        return user.name or user.email or 'User'
+    except (User.DoesNotExist, ValueError, TypeError):
+        return 'User'
+
+
 @csrf_exempt
-@require_http_methods(["GET"])
+@require_http_methods(["GET", "POST"])
 def client_quotations(request, client_id):
-    """Get all quotations for a specific client (both sent and drafts)."""
-    from .models import Client, QuotationSend, Quotation
-    
+    """Get all quotations for a client (sent + drafts). POST creates a draft quotation for this client."""
+    from .models import Client, QuotationSend, Quotation, User, Company
+
     # Get client
     try:
         client = Client.objects.get(id=client_id)
@@ -1589,51 +1681,100 @@ def client_quotations(request, client_id):
         return JsonResponse({
             'error': 'Client not found'
         }, status=404)
-    
+
+    if request.method == 'POST':
+        # Create draft quotation for this client; record who created it (company or user)
+        try:
+            user_info = get_user_from_token(request)
+            raw_uid = (user_info or {}).get('user_id')
+            try:
+                created_by_user_id = int(raw_uid) if raw_uid is not None else None
+            except (TypeError, ValueError):
+                created_by_user_id = None
+            user_type = (user_info or {}).get('user_type', 'company')
+            # If token has user_id, creator is that user
+            if created_by_user_id is not None:
+                user_type = 'user'
+            # Fallback: token has user_email but no user_id - resolve user by email so user name shows correctly
+            elif user_info and (user_info.get('user_email') or '').strip():
+                try:
+                    u = User.objects.get(email__iexact=(user_info.get('user_email') or '').strip())
+                    created_by_user_id = u.id
+                    user_type = 'user'
+                except User.DoesNotExist:
+                    pass
+            quotation_data = {
+                'status': 'draft',
+                'grand_total': 0,
+                'subtotal': 0,
+                'client_id': client_id,
+                'created_by_type': user_type,
+                'created_by_user_id': created_by_user_id,
+                'quotation_to': {
+                    'name': client.customer_name,
+                    'email': client.email,
+                    'address': client.address or '',
+                    'phone': client.phone_number or '',
+                },
+                'services': [],
+            }
+            quotation = Quotation.objects.create(quotation_data=quotation_data)
+            user_name = _get_creator_name(user_type, created_by_user_id)
+            return JsonResponse({
+                'success': True,
+                'quotation': {
+                    'id': quotation.id,
+                    'quotation_number': quotation.quotation_number,
+                    'amount': 0,
+                    'status': 'draft',
+                    'sent_at': None,
+                    'send_type': None,
+                    'user_name': user_name,
+                }
+            })
+        except Exception as e:
+            return JsonResponse({
+                'error': f'Error creating draft quotation: {str(e)}'
+            }, status=500)
+
+    # GET: list sent quotations + draft quotations for this client; include creator name (company or user)
     try:
         quotations_list = []
-        
-        # Get all draft quotations linked to this customer
+        seen_ids = set()
+
+        # 1) Draft quotations linked to this client (quotation_data.client_id)
         draft_quotations = Quotation.objects.filter(
-            customer=client,
-            is_draft=True
+            quotation_data__client_id=client_id
         ).order_by('-created_at')
-        
         for quotation in draft_quotations:
-            quotation_data = quotation.quotation_data or {}
-            grand_total = quotation_data.get('grand_total', 0)
-            status = quotation_data.get('status', 'Draft')
-            
+            seen_ids.add(quotation.id)
+            qdata = quotation.quotation_data or {}
+            created_by_type = qdata.get('created_by_type', 'company')
+            created_by_user_id = qdata.get('created_by_user_id')
+            user_name = _get_creator_name(created_by_type, created_by_user_id)
             quotations_list.append({
                 'id': quotation.id,
                 'quotation_number': quotation.quotation_number,
-                'amount': grand_total,
-                'status': status,
-                'sent_at': None,  # Drafts are not sent
+                'amount': qdata.get('grand_total', 0),
+                'status': qdata.get('status', 'draft'),
+                'sent_at': quotation.created_at.isoformat() if quotation.created_at else None,
                 'send_type': None,
+                'user_name': user_name,
             })
-        
-        # Get all quotation sends for this client (by email)
+
+        # 2) Quotations sent to this client (by email); user_id on send = who sent it (None = company)
         quotation_sends = QuotationSend.objects.filter(
             recipient_email=client.email
         ).select_related('quotation').order_by('-sent_at')
-        
-        # Track which quotations we've already added (to avoid duplicates)
-        added_quotation_ids = {q['id'] for q in quotations_list}
-        
         for send in quotation_sends:
-            quotation = send.quotation
-            # Skip if already added as draft
-            if quotation.id in added_quotation_ids:
+            if send.quotation_id in seen_ids:
                 continue
-                
+            seen_ids.add(send.quotation_id)
+            quotation = send.quotation
             quotation_data = quotation.quotation_data or {}
-            
-            # Extract relevant information
             grand_total = quotation_data.get('grand_total', 0)
-            # If quotation was sent, default status is 'submitted' unless specified otherwise
             status = quotation_data.get('status', 'submitted')
-            
+            user_name = _get_creator_name('company' if send.user_id is None else 'user', send.user_id)
             quotations_list.append({
                 'id': quotation.id,
                 'quotation_number': quotation.quotation_number,
@@ -1641,11 +1782,15 @@ def client_quotations(request, client_id):
                 'status': status,
                 'sent_at': send.sent_at.isoformat(),
                 'send_type': send.send_type,
+                'user_name': user_name,
             })
-        
-        # Sort by created_at/sent_at (most recent first)
-        quotations_list.sort(key=lambda x: x.get('sent_at') or '', reverse=True)
-        
+
+        # Sort: most recent first (use sent_at / created_at)
+        quotations_list.sort(
+            key=lambda x: x.get('sent_at') or '',
+            reverse=True
+        )
+
         return JsonResponse({
             'success': True,
             'client': {
@@ -1659,7 +1804,7 @@ def client_quotations(request, client_id):
     except Exception as e:
         return JsonResponse({
             'error': f'Error fetching client quotations: {str(e)}'
-            }, status=500)
+        }, status=500)
 
 
 # ============================================
@@ -2098,9 +2243,11 @@ def send_quotation_email(request):
         # Parse request data
         data = json.loads(request.body)
         recipient_email = data.get('recipient_email', '').strip()
+        recipient_phone = data.get('recipient_phone', '').strip()
         customer_name = data.get('customer_name', '').strip()
         pdf_base64 = data.get('pdf_base64', '').strip()
         pdf_filename = data.get('pdf_filename', 'quotation.pdf')
+        quotation_id = data.get('quotation_id')
         
         # Validation
         if not recipient_email:
@@ -2202,42 +2349,45 @@ Best regards,
             server.send_message(msg)
             server.quit()
             
-            # Track email send in database
+            # Track email send and update status to submitted
             try:
                 from .models import Quotation, QuotationSend
-                # Get quotation from session (use per-user session keys)
-                session_keys = get_session_keys_for_request(request)
-                migrate_legacy_session_for_request(request, session_keys)
-                quotation_data = request.session.get(session_keys['quotation'], None)
-                
-                if quotation_data:
-                    # Clone data so we don't mutate the session
-                    quotation_data_clean = quotation_data.copy()
-                    
-                    # If preview already reserved a quotation_number, reuse it on save.
-                    # Otherwise, let the model generate a fresh one in save().
-                    quotation_number = quotation_data_clean.get('quotation_number') or None
-                    
-                    # Save quotation to database
-                    quotation = Quotation.objects.create(
-                        quotation_number=quotation_number,
-                        quotation_data=quotation_data_clean
-                    )
-                    
-                    # Get user info from token to track who sent this
-                    user_info = get_user_from_token(request)
-                    user_id = None
-                    if user_info and user_info.get('user_type') == 'user' and user_info.get('user_id'):
-                        user_id = user_info.get('user_id')
-                    
-                    # Create QuotationSend record to track this send
+                user_info = get_user_from_token(request)
+                user_id = None
+                if user_info and user_info.get('user_type') == 'user' and user_info.get('user_id'):
+                    user_id = user_info.get('user_id')
+                if quotation_id:
+                    quotation_obj = Quotation.objects.get(id=quotation_id)
+                    qdata = quotation_obj.quotation_data or {}
+                    qdata['status'] = 'submitted'
+                    quotation_obj.quotation_data = qdata
+                    quotation_obj.save()
                     QuotationSend.objects.create(
-                        quotation=quotation,
+                        quotation=quotation_obj,
                         send_type='email',
                         recipient_email=recipient_email,
                         user_id=user_id,
                         sent_at=timezone.now()
                     )
+                else:
+                    session_keys = get_session_keys_for_request(request)
+                    migrate_legacy_session_for_request(request, session_keys)
+                    quotation_data = request.session.get(session_keys['quotation'], None)
+                    if quotation_data:
+                        quotation_data_clean = quotation_data.copy()
+                        quotation_data_clean['status'] = 'submitted'
+                        quotation_number = quotation_data_clean.get('quotation_number') or None
+                        quotation = Quotation.objects.create(
+                            quotation_number=quotation_number,
+                            quotation_data=quotation_data_clean
+                        )
+                        QuotationSend.objects.create(
+                            quotation=quotation,
+                            send_type='email',
+                            recipient_email=recipient_email,
+                            user_id=user_id,
+                            sent_at=timezone.now()
+                        )
             except Exception as track_error:
                 # Log but don't fail the email send if tracking fails
                 import logging
@@ -2273,6 +2423,76 @@ Best regards,
         return JsonResponse({
             'error': f'Error sending email: {str(e)}'
         }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def send_quotation_whatsapp(request):
+    """Create QuotationSend record for WhatsApp, update status to submitted, return wa.me link."""
+    try:
+        from .models import Quotation, QuotationSend, Company
+        data = json.loads(request.body)
+        quotation_id = data.get('quotation_id')
+        import re
+        recipient_phone = re.sub(r'\D', '', (data.get('recipient_phone') or '').strip())
+        if len(recipient_phone) > 10:
+            recipient_phone = recipient_phone[-10:]
+        customer_name = (data.get('customer_name') or '').strip()
+        if not quotation_id:
+            return JsonResponse({'error': 'Quotation ID is required'}, status=400)
+        quotation_obj = Quotation.objects.get(id=quotation_id)
+        user_info = get_user_from_token(request)
+        user_id = None
+        if user_info and user_info.get('user_type') == 'user' and user_info.get('user_id'):
+            user_id = user_info.get('user_id')
+        qdata = quotation_obj.quotation_data or {}
+        qdata['status'] = 'submitted'
+        quotation_obj.quotation_data = qdata
+        quotation_obj.save()
+        phone_for_wa = recipient_phone
+        if not phone_for_wa.startswith('91') and len(phone_for_wa) == 10:
+            phone_for_wa = '91' + phone_for_wa
+        QuotationSend.objects.create(
+            quotation=quotation_obj,
+            send_type='whatsapp',
+            recipient_phone=recipient_phone or None,
+            user_id=user_id,
+            sent_at=timezone.now()
+        )
+        wa_link = f"https://wa.me/{phone_for_wa}" if phone_for_wa else None
+        return JsonResponse({
+            'success': True,
+            'message': 'Status updated to Submitted. Open WhatsApp to share.',
+            'wa_link': wa_link
+        })
+    except Quotation.DoesNotExist:
+        return JsonResponse({'error': 'Quotation not found'}, status=404)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["PATCH", "PUT"])
+def update_quotation_status(request, quotation_id):
+    """Update quotation status (e.g. Submitted → Awarded)."""
+    try:
+        from .models import Quotation
+        data = json.loads(request.body)
+        new_status = (data.get('status') or '').strip().lower()
+        if new_status not in ('draft', 'submitted', 'awarded'):
+            return JsonResponse({'error': 'Invalid status'}, status=400)
+        quotation_obj = Quotation.objects.get(id=quotation_id)
+        qdata = quotation_obj.quotation_data or {}
+        qdata['status'] = new_status
+        quotation_obj.quotation_data = qdata
+        quotation_obj.save()
+        return JsonResponse({'success': True, 'status': new_status})
+    except Quotation.DoesNotExist:
+        return JsonResponse({'error': 'Quotation not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
 
 
 @csrf_exempt
@@ -2354,32 +2574,34 @@ def dashboard_stats(request):
             inactive_customers = 0
             total_users = 0
         
-        # Monthly Quotation SENT counts data (for bar chart)
-        # Get all quotations SENT in the selected year, grouped by month
-        # Format monthly data for chart (all 12 months)
+        # Monthly Quotation CREATED counts data (for bar chart)
+        # Count quotations CREATED (not sent) per month - includes drafts and all statuses
+        # Filter by user: company sees all, admin sees all, regular user sees all (no created_by on Quotation)
         months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
         monthly_data = []
         
         for month_num in range(1, 13):
-            # Get sends for this month, filtered by user if not admin
+            # Count quotations CREATED in this month
+            month_quotations = Quotation.objects.filter(
+                created_at__year=year,
+                created_at__month=month_num
+            )
+            total_created = month_quotations.count()
+            
+            # Also get sends for this month (for email/whatsapp breakdown if needed)
             month_sends_all = QuotationSend.objects.filter(
                 sent_at__year=year,
                 sent_at__month=month_num,
                 **quotation_send_filter
             )
-            
-            # Count email and whatsapp sends
             email_count = month_sends_all.filter(send_type='email').count()
             whatsapp_count = month_sends_all.filter(send_type='whatsapp').count()
-            
-            # Total quotations sent in this month (total sends, not unique)
-            total_sent = month_sends_all.count()
             
             monthly_data.append({
                 'month': months[month_num - 1],
                 'email': email_count,
                 'whatsapp': whatsapp_count,
-                'total': total_sent  # Total quotations sent in this month
+                'total': total_created  # Total quotations CREATED in this month
             })
         
         # Total Email vs WhatsApp breakdown (for pie chart) - filter by user if not admin
@@ -2499,6 +2721,79 @@ def dashboard_stats(request):
         
         return JsonResponse({
             'error': f'Error fetching dashboard stats: {str(e)}'
+        }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def dashboard_customer_list(request):
+    """
+    Get customer list for dashboard (chart keela customer list).
+    Returns data in exact shape expected by frontend recentDetails:
+    id, name, company, email, phone, totalQuotation, status.
+    """
+    try:
+        from .models import Client, QuotationSend, Quotation
+        from collections import defaultdict
+
+        user_info = get_user_from_token(request)
+        if not user_info:
+            return JsonResponse({
+                'success': False,
+                'error': 'Authentication required'
+            }, status=401)
+
+        # Same total-quotation logic as list_clients: drafts + sent by email
+        draft_by_client = defaultdict(set)
+        for cid, qid in Quotation.objects.filter(
+            quotation_data__client_id__isnull=False
+        ).values_list('quotation_data__client_id', 'id'):
+            if cid:
+                draft_by_client[cid].add(qid)
+
+        sent_by_email = defaultdict(set)
+        for email, qid in QuotationSend.objects.filter(
+            recipient_email__isnull=False
+        ).values_list('recipient_email', 'quotation_id'):
+            sent_by_email[email].add(qid)
+
+        def total_quotations_for_client(client):
+            draft_ids = draft_by_client.get(client.id, set())
+            sent_ids = sent_by_email.get(client.email, set())
+            return len(draft_ids | sent_ids)
+
+        # Latest customers first, limit for dashboard (default 20, max 100)
+        try:
+            limit = min(int(request.GET.get('limit', 20)), 100)
+        except (ValueError, TypeError):
+            limit = 20
+        clients = Client.objects.all().order_by('-created_at')[:limit]
+
+        customers_list = [
+            {
+                'id': client.id,
+                'name': client.customer_name,
+                'company': client.company_name or '',
+                'email': client.email,
+                'phone': client.phone_number or '',
+                'totalQuotation': total_quotations_for_client(client),
+                'status': 'Active' if client.is_active else 'Inactive',
+            }
+            for client in clients
+        ]
+
+        return JsonResponse({
+            'success': True,
+            'customers': customers_list,
+            'count': len(customers_list)
+        })
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f'Dashboard customer list error: {str(e)}', exc_info=True)
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
         }, status=500)
 
 
