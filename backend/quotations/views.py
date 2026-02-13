@@ -2794,6 +2794,47 @@ def dashboard_stats(request):
         except ValueError:
             year = current_year
         
+        # Check for week parameter (date string in format YYYY-MM-DD)
+        week_date_param = request.GET.get('week_date', None)
+        week_data = None
+        if week_date_param:
+            try:
+                from datetime import datetime, timedelta
+                week_date = datetime.strptime(week_date_param, '%Y-%m-%d').date()
+                # Calculate Sunday of that week
+                # weekday() returns Monday=0, Tuesday=1, ..., Sunday=6
+                day_of_week = week_date.weekday()
+                # If Sunday (6), no change needed. Otherwise, go back to Sunday
+                if day_of_week == 6:  # Sunday
+                    week_start = week_date
+                else:
+                    # Go back (day_of_week + 1) days to reach Sunday
+                    # Monday (0) -> back 1 day, Tuesday (1) -> back 2 days, etc.
+                    week_start = week_date - timedelta(days=day_of_week + 1)
+                
+                week_end = week_start + timedelta(days=6)  # Saturday
+                
+                # Get daily quotation counts for the week (Sunday to Saturday)
+                daily_data = []
+                weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+                
+                for i in range(7):
+                    current_day = week_start + timedelta(days=i)
+                    day_quotations = Quotation.objects.filter(
+                        created_at__date=current_day
+                    )
+                    day_count = day_quotations.count()
+                    
+                    daily_data.append({
+                        'day': weekdays[i],
+                        'date': current_day.strftime('%Y-%m-%d'),
+                        'total': day_count
+                    })
+                
+                week_data = daily_data
+            except (ValueError, TypeError):
+                week_data = None
+        
         # Base queryset for QuotationSend - filter based on user type
         quotation_send_filter = {}
         if user_type == 'company':
@@ -3030,43 +3071,49 @@ def dashboard_stats(request):
                 'user_breakdown': user_breakdown  # Who sent how many
             })
         
+        response_data = {
+            'kpis': {
+                'total_quotations': total_quotations,
+                'total_customers': total_customers,
+                'active_customers': active_customers,
+                'inactive_customers': inactive_customers,
+                'total_users': total_users,
+                'total_draft': total_draft,
+                'total_submitted_value': round(total_submitted_value, 2),
+                'total_awarded_value': round(total_awarded_value, 2)
+            },
+            'monthly_sends': monthly_data,
+            'send_breakdown': {
+                'email': {
+                    'count': total_email_sends,
+                    'percentage': email_percentage,
+                    'grand_total': round(email_grand_total, 2)
+                },
+                'whatsapp': {
+                    'count': total_whatsapp_sends,
+                    'percentage': whatsapp_percentage,
+                    'grand_total': round(whatsapp_grand_total, 2)
+                },
+                'total': total_sends,
+                'total_grand_total': round(total_grand_total, 2)
+            },
+            'customers': customers_list,
+            'year': year,
+            'status_breakdown': {
+                'draft': status_breakdown['draft'],
+                'submitted': status_breakdown['submitted'],
+                'awarded': status_breakdown['awarded'],
+                'total': sum(status_breakdown.values())
+            }
+        }
+        
+        # Add week_data if available
+        if week_data is not None:
+            response_data['week_data'] = week_data
+        
         return JsonResponse({
             'success': True,
-            'data': {
-                'kpis': {
-                    'total_quotations': total_quotations,
-                    'total_customers': total_customers,
-                    'active_customers': active_customers,
-                    'inactive_customers': inactive_customers,
-                    'total_users': total_users,
-                    'total_draft': total_draft,
-                    'total_submitted_value': round(total_submitted_value, 2),
-                    'total_awarded_value': round(total_awarded_value, 2)
-                },
-                'monthly_sends': monthly_data,
-                'send_breakdown': {
-                    'email': {
-                        'count': total_email_sends,
-                        'percentage': email_percentage,
-                        'grand_total': round(email_grand_total, 2)
-                    },
-                    'whatsapp': {
-                        'count': total_whatsapp_sends,
-                        'percentage': whatsapp_percentage,
-                        'grand_total': round(whatsapp_grand_total, 2)
-                    },
-                    'total': total_sends,
-                    'total_grand_total': round(total_grand_total, 2)
-                },
-                'customers': customers_list,
-                'year': year,
-                'status_breakdown': {
-                    'draft': status_breakdown['draft'],
-                    'submitted': status_breakdown['submitted'],
-                    'awarded': status_breakdown['awarded'],
-                    'total': sum(status_breakdown.values())
-                }
-            }
+            'data': response_data
         })
     
     except Exception as e:
