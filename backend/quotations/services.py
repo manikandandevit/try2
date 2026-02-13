@@ -16,8 +16,9 @@ class IntentClassifier:
     
     INTENT_PATTERNS = {
         'add': [
-            r'\b(add|include|insert|create)\b',
-            r'\b(add|include|insert|create)\s+service\b',
+            r'\b(add|include|insert|create|new)\b',
+            r'\b(add|include|insert|create|new)\s+service\b',
+            r'\b(add|include|insert|create|new)\s+[a-zA-Z]+\b',  # "add pants", "add service"
         ],
         'remove': [
             r'\b(remove|delete|drop|exclude)\b',
@@ -100,15 +101,18 @@ class IntentClassifier:
         # Pattern 1: "create a Quotation For Website quantity 1 price 45000"
         # Pattern 2: "add service Web Development quantity 2 price 25000"
         # Pattern 3: "add Web Development quantity 2 price 25000"
+        # Pattern 4: "add service pants 10, 100" or "add service pant"
         service_patterns = [
             # Handle "create/quotation for" patterns - extract what comes after "for" and before quantity/price
-            r'(?:create|add|make|new)\s+(?:a\s+)?(?:quotation\s+for|service\s+for|for)\s+(.+?)(?:\s+(?:quantity|qty|price|rate|₹|rs|rupees?|cost))',
-            # Handle "add service X quantity Y price Z"
-            r'(?:add|create|insert|include)\s+(?:a\s+)?(?:service\s+)?(.+?)(?:\s+(?:quantity|qty|price|rate|₹|rs|rupees?|cost))',
+            r'(?:create|add|make|new)\s+(?:a\s+)?(?:quotation\s+for|service\s+for|for)\s+(.+?)(?:\s+(?:quantity|qty|price|rate|₹|rs|rupees?|cost|\d))',
+            # Handle "add service X quantity Y price Z" or "add service X Y Z" (numbers)
+            r'(?:add|create|insert|include)\s+(?:a\s+)?(?:service\s+)?(.+?)(?:\s+(?:quantity|qty|price|rate|₹|rs|rupees?|cost|\d))',
             # Handle "X quantity Y price Z" (direct pattern)
-            r'^(.+?)(?:\s+(?:quantity|qty|price|rate|₹|rs|rupees?|cost))',
+            r'^(.+?)(?:\s+(?:quantity|qty|price|rate|₹|rs|rupees?|cost|\d))',
             # Handle patterns with numbers at the end (quantity/price)
             r'(.+?)(?:\s+(?:quantity|qty)\s+\d+)',
+            # Handle simple "add service X" (no numbers) - extract everything after "add service"
+            r'(?:add|create|insert|include)\s+(?:a\s+)?(?:service\s+)?([a-zA-Z\s]+?)(?:\s*$|\s*$)',
         ]
         
         for pattern in service_patterns:
@@ -120,18 +124,26 @@ class IntentClassifier:
                 service_name = clean_service_name(service_name)
                 
                 # Additional cleanup: remove any trailing numbers or common words
+                # But be careful - if it's "pants 10", we want to keep "pants" and extract "10" separately
+                # So only remove trailing numbers if they're not part of a sequence
+                # Check if there are numbers after this that might be quantity/price
                 service_name = re.sub(r'\s+\d+\s*$', '', service_name).strip()
                 
+                # Remove trailing common words that might be part of the pattern
+                service_name = re.sub(r'\s+(service|services|work|works|quotation|quotations)\s*$', '', service_name, flags=re.IGNORECASE).strip()
+                
                 # Validate: service name should be meaningful (at least 2 chars, not just numbers)
-                if service_name and len(service_name) > 2 and not service_name.isdigit():
+                if service_name and len(service_name) > 1 and not service_name.isdigit():
                     # Final check: if it still contains "quotation for" or "service for", extract the part after "for"
                     if re.search(r'(?:quotation|service)\s+for\s+', service_name, re.IGNORECASE):
                         after_for = re.split(r'(?:quotation|service)\s+for\s+', service_name, flags=re.IGNORECASE)
                         if len(after_for) > 1:
                             service_name = after_for[-1].strip()
                     
-                    entities['service_name'] = service_name
-                    break
+                    # Additional validation: ensure it's not just common words
+                    if service_name.lower() not in ['add', 'create', 'insert', 'include', 'service', 'for', 'a', 'an', 'the']:
+                        entities['service_name'] = service_name
+                        break
         
         # Extract quantity
         quantity_patterns = [
@@ -161,6 +173,42 @@ class IntentClassifier:
                     break
                 except ValueError:
                     pass
+        
+        # Enhanced extraction: Handle patterns like "add service pants 10, 100" or "add service pant 10 100"
+        # Extract all numbers after service name (comma-separated or space-separated)
+        if not entities.get('quantity') or not entities.get('price'):
+            # Pattern: service name followed by two numbers separated by comma: "pants 10, 100"
+            number_sequence_pattern = r'(?:add|create|insert|include)\s+(?:a\s+)?(?:service\s+)?[a-zA-Z\s]+\s+(\d+)\s*[,]\s*(\d+(?:\.\d+)?)'
+            match = re.search(number_sequence_pattern, user_message, re.IGNORECASE)
+            if match:
+                try:
+                    if not entities.get('quantity'):
+                        entities['quantity'] = int(match.group(1))
+                    if not entities.get('price'):
+                        entities['price'] = float(match.group(2))
+                except (ValueError, IndexError):
+                    pass
+            
+            # Pattern: service name followed by two space-separated numbers: "pant 10 100"
+            if not entities.get('quantity') or not entities.get('price'):
+                # Match pattern: "add service [words] [number] [number]"
+                number_sequence_pattern2 = r'(?:add|create|insert|include)\s+(?:a\s+)?(?:service\s+)?([a-zA-Z\s]+?)\s+(\d+)\s+(\d+(?:\.\d+)?)(?:\s|$)'
+                match = re.search(number_sequence_pattern2, user_message, re.IGNORECASE)
+                if match:
+                    try:
+                        # Check if service name was already extracted
+                        if not entities.get('service_name'):
+                            potential_service = match.group(1).strip()
+                            # Clean service name
+                            potential_service = clean_service_name(potential_service)
+                            if potential_service and len(potential_service) > 1 and not potential_service.isdigit():
+                                entities['service_name'] = potential_service
+                        if not entities.get('quantity'):
+                            entities['quantity'] = int(match.group(2))
+                        if not entities.get('price'):
+                            entities['price'] = float(match.group(3))
+                    except (ValueError, IndexError):
+                        pass
         
         # Extract old and new values for change operations
         change_patterns = [
@@ -468,16 +516,28 @@ ADDING SERVICES RULES
 ----------------------------------
 If the user asks to ADD a service:
 
-1. Check if BOTH quantity and unit_price are provided in the request.
-2. If BOTH are provided:
-   - Add the service immediately
+1. Extract service name from the request (even if incomplete).
+2. Check if quantity and unit_price are provided in the request.
+3. If BOTH quantity and unit_price are provided:
+   - Add the service immediately with those values
    - ALWAYS include "key_features" array with EXACTLY 4 relevant features for that service
    - Generate 4 professional, relevant key features based on the service type
    - Recalculate totals
-3. If ANY value is missing:
+4. If quantity OR price is missing (but service name is clear):
+   - ADD the service with default values: quantity=0, unit_price=0
+   - ALWAYS include "key_features" array with EXACTLY 4 relevant features for that service
+   - Generate 4 professional, relevant key features based on the service type
+   - Recalculate totals
+   - In your message, inform the user: "I've added [service name] with quantity 0 and price 0. You can modify these values later."
+5. If service name cannot be determined:
    - DO NOT modify quotation JSON
-   - Ask a clear follow-up question
-   - Example: "What quantity and price should I use for [service name]?"
+   - Ask a clear follow-up question: "What service would you like to add?"
+
+IMPORTANT: When user says "add service X" or "add X" without quantity/price:
+- Extract service name: X
+- Add service with quantity=0, unit_price=0
+- User can modify these values later through chat commands
+- This allows users to quickly add services and fill in details later
 
 KEY FEATURES RULES (MANDATORY):
 - EVERY service MUST have a "key_features" array with EXACTLY 4 items
@@ -876,7 +936,10 @@ ALWAYS return valid JSON that matches the exact format above."""
         
         # Add intent-specific guidance
         intent_guidance = {
-            'add': "\n\nCURRENT INTENT: User wants to ADD a service. Ensure both quantity and price are provided.",
+            'add': "\n\nCURRENT INTENT: User wants to ADD a service.\n"
+                   "- If quantity and price are provided, use those values.\n"
+                   "- If quantity or price is missing, add service with quantity=0, unit_price=0.\n"
+                   "- User can modify these values later. Always add the service if service name is clear.",
             'remove': "\n\nCURRENT INTENT: User wants to REMOVE a service. Use fuzzy matching to find the service name.",
             'change': "\n\nCURRENT INTENT: User wants to CHANGE/UPDATE something. Only modify the specified field.",
             'view': "\n\nCURRENT INTENT: User wants to VIEW the quotation. Return current quotation without modifications.",
@@ -899,6 +962,212 @@ ALWAYS return valid JSON that matches the exact format above."""
             guidance += "\n\nEXTRACTED ENTITIES: " + ", ".join(entity_hints)
         
         return base_prompt + guidance
+    
+    def _enhance_service_names(self, current_quotation: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """Enhance service names using AI to format them intelligently."""
+        if not current_quotation or not current_quotation.get('services'):
+            return "No services to enhance.", current_quotation
+        
+        # Build enhancement prompt
+        services_list = "\n".join([
+            f"- {s.get('service_name', 'Unknown')}"
+            for s in current_quotation.get('services', [])
+        ])
+        
+        enhancement_prompt = f"""You are a professional quotation formatting assistant.
+
+TASK: Format all service names in the quotation professionally and intelligently.
+
+Current service names:
+{services_list}
+
+CRITICAL FORMATTING RULES:
+1. Title Case for multi-word services: 
+   - "web development" → "Web Development"
+   - "mobile app" → "Mobile App"
+   - "graphic design" → "Graphic Design"
+
+2. Compound words and single words:
+   - "tshirt" → "T-Shirt" (preferred) or "Tshirt" (if more appropriate)
+   - "pants" → "Pants" (capitalize first letter)
+   - "shirt" → "Shirt"
+   - "shoes" → "Shoes"
+
+3. Technical terms (keep as acronyms):
+   - "api" → "API"
+   - "ui" → "UI"
+   - "ux" → "UX"
+   - "seo" → "SEO"
+
+4. E-commerce and compound words:
+   - "ecommerce" → "E-Commerce"
+   - "website" → "Website" (single word, capitalize)
+   - "software" → "Software"
+
+5. Professional formatting:
+   - Capitalize first letter of each significant word
+   - Use hyphens for compound words when it improves readability
+   - Keep brand names and proper nouns correctly capitalized
+   - Make names professional and business-appropriate
+
+6. IMPORTANT: 
+   - Do NOT change quantities, prices, amounts, or any other data
+   - ONLY update the service_name field
+   - Preserve all other fields exactly as they are
+   - Keep the same number of services
+
+EXAMPLES:
+- "tshirt" → "T-Shirt"
+- "pants" → "Pants"  
+- "web development" → "Web Development"
+- "mobile app development" → "Mobile App Development"
+- "api integration" → "API Integration"
+
+Return the complete quotation JSON with ONLY service_name fields updated. All other fields must remain exactly the same.
+
+Current quotation JSON:
+{json.dumps(current_quotation, indent=2)}"""
+
+        messages = [
+            {
+                "role": "system",
+                "content": self.get_system_prompt() + "\n\nENHANCEMENT MODE: Format service names professionally. Return JSON with formatted names only."
+            },
+            {
+                "role": "user",
+                "content": enhancement_prompt
+            }
+        ]
+        
+        try:
+            ai_response = self.chat_completion(messages)
+            if not ai_response:
+                return "Enhancement failed. Please try again.", current_quotation
+            
+            parsed_response = self.parse_response_json(ai_response)
+            if parsed_response and parsed_response.get('quotation'):
+                enhanced_quotation = parsed_response.get('quotation')
+                # Normalize and validate
+                enhanced_quotation = QuotationManager.normalize_quotation(enhanced_quotation)
+                if QuotationManager.validate_quotation(enhanced_quotation):
+                    message = parsed_response.get('message', 'Service names have been enhanced professionally.')
+                    return message, enhanced_quotation
+        except Exception as e:
+            print(f"Enhancement error: {e}")
+        
+        # Fallback: Use simple formatting rules
+        return self._fallback_enhance_service_names(current_quotation)
+    
+    def _fallback_enhance_service_names(self, current_quotation: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """Fallback enhancement using simple formatting rules."""
+        if not current_quotation or not current_quotation.get('services'):
+            return "No services to enhance.", current_quotation
+        
+        enhanced_services = []
+        for service in current_quotation.get('services', []):
+            service_name = service.get('service_name', '')
+            if service_name:
+                # Convert to lowercase first for consistent processing
+                name_lower = service_name.lower().strip()
+                
+                # Handle single words (capitalize first letter)
+                if ' ' not in name_lower:
+                    # Special cases for compound words
+                    if name_lower == 'tshirt' or name_lower == 't-shirt':
+                        formatted_name = 'T-Shirt'
+                    elif name_lower in ['pants', 'pant']:
+                        formatted_name = 'Pants'
+                    elif name_lower in ['shirt', 'shirts']:
+                        formatted_name = 'Shirt' if name_lower == 'shirt' else 'Shirts'
+                    elif name_lower in ['shoes', 'shoe']:
+                        formatted_name = 'Shoes' if name_lower == 'shoes' else 'Shoe'
+                    else:
+                        # Capitalize first letter
+                        formatted_name = name_lower.capitalize()
+                else:
+                    # Multi-word: title case
+                    words = name_lower.split()
+                    formatted_name = ' '.join([word.capitalize() for word in words])
+                
+                # Handle technical terms and common replacements
+                replacements = {
+                    'Api': 'API',
+                    'Ui': 'UI',
+                    'Ux': 'UX',
+                    'Seo': 'SEO',
+                    'Ecommerce': 'E-Commerce',
+                    'Website': 'Website',
+                    'Web Development': 'Web Development',
+                    'Mobile App': 'Mobile App',
+                }
+                
+                for old, new in replacements.items():
+                    if old in formatted_name:
+                        formatted_name = formatted_name.replace(old, new)
+                
+                enhanced_service = {**service, 'service_name': formatted_name}
+            else:
+                enhanced_service = service
+            enhanced_services.append(enhanced_service)
+        
+        enhanced_quotation = {
+            **current_quotation,
+            'services': enhanced_services
+        }
+        enhanced_quotation = QuotationManager.calculate_totals(enhanced_quotation)
+        
+        return "Service names have been enhanced.", enhanced_quotation
+    
+    def _generate_key_features(self, service_name: str) -> List[str]:
+        """Generate 4 relevant key features for a service based on its name."""
+        service_lower = service_name.lower()
+        
+        # Generic features that work for most services
+        generic_features = [
+            "Professional quality service",
+            "Expert team handling",
+            "Timely delivery guaranteed",
+            "Customer satisfaction priority"
+        ]
+        
+        # Service-specific features based on keywords
+        if any(word in service_lower for word in ['web', 'website', 'site', 'app', 'application', 'software', 'development']):
+            return [
+                "Responsive design for all devices",
+                "SEO optimized for better visibility",
+                "Fast loading speed and performance",
+                "Mobile-friendly interface"
+            ]
+        elif any(word in service_lower for word in ['construction', 'building', 'work', 'renovation', 'repair']):
+            return [
+                "High-quality materials used",
+                "Experienced professionals",
+                "Timely project completion",
+                "Quality assurance guaranteed"
+            ]
+        elif any(word in service_lower for word in ['marketing', 'advertising', 'promotion', 'branding']):
+            return [
+                "Targeted audience reach",
+                "Data-driven strategies",
+                "ROI-focused campaigns",
+                "Multi-channel approach"
+            ]
+        elif any(word in service_lower for word in ['design', 'graphic', 'logo', 'creative']):
+            return [
+                "Modern and creative designs",
+                "Brand-aligned aesthetics",
+                "Multiple design options",
+                "Professional quality output"
+            ]
+        elif any(word in service_lower for word in ['consulting', 'advisory', 'strategy']):
+            return [
+                "Expert industry knowledge",
+                "Customized solutions",
+                "Strategic planning support",
+                "Ongoing guidance provided"
+            ]
+        else:
+            return generic_features
     
     def _handle_error(self, error_type: str, user_message: str, current_quotation: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         """Handle different types of errors with appropriate messages."""
@@ -943,20 +1212,28 @@ ALWAYS return valid JSON that matches the exact format above."""
                 return f"I couldn't find a service matching '{service_name}'. Please check the service name and try again.", current_quotation
         
         # Handle add with extracted entities
-        elif intent == 'add' and entities.get('service_name') and entities.get('quantity') and entities.get('price'):
+        elif intent == 'add' and entities.get('service_name'):
             service_name = entities['service_name']
-            quantity = entities['quantity']
-            price = entities['price']
+            quantity = entities.get('quantity', 0)  # Default to 0 if not provided
+            price = entities.get('price', 0)  # Default to 0 if not provided
+            
+            # Generate key features based on service name
+            key_features = self._generate_key_features(service_name)
             
             new_service = {
                 'service_name': service_name,
                 'quantity': quantity,
                 'unit_price': price,
-                'amount': round(quantity * price, 2)
+                'amount': round(quantity * price, 2),
+                'key_features': key_features
             }
             current_quotation['services'].append(new_service)
             current_quotation = QuotationManager.calculate_totals(current_quotation)
-            return f"I've added '{service_name}' with quantity {quantity} and price ₹{price:,.2f}.", current_quotation
+            
+            if quantity > 0 and price > 0:
+                return f"I've added '{service_name}' with quantity {quantity} and price ₹{price:,.2f}.", current_quotation
+            else:
+                return f"I've added '{service_name}' with quantity 0 and price 0. You can modify these values later.", current_quotation
         
         # Handle view
         elif intent == 'view':
@@ -976,7 +1253,8 @@ ALWAYS return valid JSON that matches the exact format above."""
         self, 
         user_message: str, 
         current_quotation: Optional[Dict[str, Any]] = None,
-        conversation_history: list = None
+        conversation_history: list = None,
+        enhance_mode: bool = False
     ) -> Tuple[str, Optional[Dict[str, Any]]]:
         """
         Process user message and return AI response with updated quotation.
@@ -990,6 +1268,10 @@ ALWAYS return valid JSON that matches the exact format above."""
         # Initialize quotation if not provided
         if current_quotation is None:
             current_quotation = QuotationManager.initialize_quotation()
+        
+        # Check if this is enhancement mode
+        if enhance_mode or "ENHANCE_QUOTATION" in user_message.upper():
+            return self._enhance_service_names(current_quotation)
         
         # Classify intent and extract entities
         intent = IntentClassifier.classify(user_message)

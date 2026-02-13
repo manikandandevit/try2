@@ -420,6 +420,7 @@ def chat(request):
         data = json.loads(request.body)
         user_message = data.get('message', '').strip()
         quotation_id = data.get('quotation_id')
+        enhance_mode = data.get('enhance_mode', False) or 'ENHANCE_QUOTATION' in user_message.upper()
         
         if not user_message:
             return JsonResponse({'error': 'Message is required'}, status=400)
@@ -454,7 +455,8 @@ def chat(request):
         message, updated_quotation = openrouter_service.process_user_message(
             user_message=user_message,
             current_quotation=current_quotation,
-            conversation_history=conversation_history
+            conversation_history=conversation_history,
+            enhance_mode=enhance_mode
         )
         
         if existing_quotation_number:
@@ -2643,6 +2645,37 @@ def dashboard_stats(request):
         email_percentage = round((total_email_sends / total_sends * 100) if total_sends > 0 else 0, 1)
         whatsapp_percentage = round((total_whatsapp_sends / total_sends * 100) if total_sends > 0 else 0, 1)
         
+        # Status breakdown for pie chart (Draft, Submitted, Awarded) by month/year
+        month_param = request.GET.get('month', None)
+        status_breakdown = {
+            'draft': 0,
+            'submitted': 0,
+            'awarded': 0
+        }
+        
+        if month_param:
+            try:
+                month_num = int(month_param)
+                if 1 <= month_num <= 12:
+                    # Filter quotations by month and year
+                    month_quotations = Quotation.objects.filter(
+                        created_at__year=year,
+                        created_at__month=month_num
+                    )
+                    
+                    # Count by status from quotation_data
+                    for quotation in month_quotations:
+                        quotation_data = quotation.quotation_data or {}
+                        status = quotation_data.get('status', 'draft').lower()
+                        if status in status_breakdown:
+                            status_breakdown[status] += 1
+                        else:
+                            # Default to draft if status is invalid
+                            status_breakdown['draft'] += 1
+            except ValueError:
+                pass
+        # If month not provided, status_breakdown remains with all zeros
+        
         # Get customer list with quotation counts and user breakdown
         # Customer card is UNIVERSAL - show ALL quotations sent to each customer (from all users)
         customers_list = []
@@ -2710,7 +2743,13 @@ def dashboard_stats(request):
                     'total_grand_total': round(total_grand_total, 2)
                 },
                 'customers': customers_list,
-                'year': year
+                'year': year,
+                'status_breakdown': {
+                    'draft': status_breakdown['draft'],
+                    'submitted': status_breakdown['submitted'],
+                    'awarded': status_breakdown['awarded'],
+                    'total': sum(status_breakdown.values())
+                }
             }
         })
     
