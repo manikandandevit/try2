@@ -470,7 +470,8 @@ def chat(request):
                 updated_quotation['quotation_number'] = existing_quotation_number
             if "issue" not in message.lower() and "error" not in message.lower():
                 message = message + " (Note: Some quotation data was invalid and has been corrected.)"
-        updated_quotation = ensure_quotation_number(updated_quotation)
+        # Do NOT auto-generate quotation_number here - only generate when actually creating a new quote in database
+        # updated_quotation = ensure_quotation_number(updated_quotation)
         
         conversation_history = conversation_history + [
             {"role": "user", "content": user_message},
@@ -486,6 +487,19 @@ def chat(request):
                     if k != 'conversation_history' and k not in ('id', 'created_at', 'updated_at'):
                         qdata[k] = v
                 qdata['conversation_history'] = conversation_history
+                
+                # Track who updated this quotation
+                user_info = get_user_from_token(request)
+                if user_info:
+                    updated_by_type = user_info.get('user_type', 'company')
+                    updated_by_user_id = user_info.get('user_id')
+                    if updated_by_type == 'user' and updated_by_user_id:
+                        qdata['updated_by_type'] = 'user'
+                        qdata['updated_by_user_id'] = updated_by_user_id
+                    else:
+                        qdata['updated_by_type'] = 'company'
+                        qdata['updated_by_user_id'] = None
+                
                 quotation_obj.quotation_data = qdata
                 quotation_obj.save()
             except (Quotation.DoesNotExist, ValueError):
@@ -513,8 +527,8 @@ def get_quotation(request):
     migrate_legacy_session_for_request(request, session_keys)
     quotation = request.session.get(session_keys['quotation'], QuotationManager.initialize_quotation())
     
-    # Ensure quotation_number is present for preview
-    quotation = ensure_quotation_number(quotation)
+    # Do NOT auto-generate quotation_number here - only generate when actually creating a new quote in database
+    # quotation = ensure_quotation_number(quotation)
     
     return JsonResponse({
         'quotation': quotation
@@ -699,7 +713,10 @@ def sync_quotation(request):
             quotation['quotation_number'] = quotation.get('quotation_number')
         elif existing_number:
             quotation['quotation_number'] = existing_number
-        quotation = ensure_quotation_number(quotation)
+        
+        # Only generate quotation_number when actually creating a new quotation in database
+        # Do NOT generate just for syncing session quotations
+        # quotation = ensure_quotation_number(quotation)
         
         if not QuotationManager.validate_quotation(quotation):
             return JsonResponse({'error': 'Invalid quotation structure'}, status=400)
@@ -713,6 +730,19 @@ def sync_quotation(request):
                         qdata[k] = v
                 if 'conversation_history' in quotation and isinstance(quotation.get('conversation_history'), list):
                     qdata['conversation_history'] = quotation['conversation_history']
+                
+                # Track who updated this quotation
+                user_info = get_user_from_token(request)
+                if user_info:
+                    updated_by_type = user_info.get('user_type', 'company')
+                    updated_by_user_id = user_info.get('user_id')
+                    if updated_by_type == 'user' and updated_by_user_id:
+                        qdata['updated_by_type'] = 'user'
+                        qdata['updated_by_user_id'] = updated_by_user_id
+                    else:
+                        qdata['updated_by_type'] = 'company'
+                        qdata['updated_by_user_id'] = None
+                
                 quotation_obj.quotation_data = qdata
                 quotation_obj.save()
             except (Quotation.DoesNotExist, ValueError):
@@ -871,16 +901,16 @@ def login(request):
                 'error': 'Invalid JSON in request body'
             }, status=400)
         
-        user_email = data.get('email', '').strip()
+        user_email_or_username = data.get('email', '').strip()  # Can be email or username
         user_password = data.get('password', '').strip()
         
-        print(f"Login attempt - Email: {user_email}, Password length: {len(user_password) if user_password else 0}")
+        print(f"Login attempt - Email/Username: {user_email_or_username}, Password length: {len(user_password) if user_password else 0}")
         
         # Validate input
-        if not user_email:
+        if not user_email_or_username:
             return JsonResponse({
                 'success': False,
-                'error': 'Email is required'
+                'error': 'Email or Username is required'
             }, status=400)
         
         if not user_password:
@@ -889,21 +919,28 @@ def login(request):
                 'error': 'Password is required'
             }, status=400)
         
-        # First, try to authenticate as User
+        # First, try to authenticate as User (by email or username)
         try:
-            print(f"Checking for user with email: {user_email}")
-            user = User.objects.get(email__iexact=user_email)
-            print(f"User found: {user.email}, Active: {user.is_active}")
+            print(f"Checking for user with email/username: {user_email_or_username}")
+            # Try to find user by email first, then by username
+            from django.db.models import Q
+            user = User.objects.filter(
+                Q(email__iexact=user_email_or_username) | Q(username__iexact=user_email_or_username)
+            ).first()
+            
+            if not user:
+                raise User.DoesNotExist("User not found")
+            print(f"User found: {user.email} (username: {user.username}), Active: {user.is_active}")
             
             # User exists, check password and active status
             if not user.is_active:
-                print(f"User account is inactive: {user_email}")
+                print(f"User account is inactive: {user_email_or_username}")
                 return JsonResponse({
                     'success': False,
                     'error': 'Your account is inactive. Please contact administrator.'
                 }, status=401)
             
-            print(f"Checking password for user: {user_email}")
+            print(f"Checking password for user: {user_email_or_username}")
             print(f"Stored password hash (first 50 chars): {user.password[:50] if user.password else 'None'}")
             print(f"Input password length: {len(user_password)}")
             
@@ -976,13 +1013,13 @@ def login(request):
                 })
             else:
                 # User exists but password is wrong
-                print(f"Password mismatch for user: {user_email}")
+                print(f"Password mismatch for user: {user_email_or_username}")
                 return JsonResponse({
                     'success': False,
-                    'error': 'Invalid email or password'
+                    'error': 'Invalid email/username or password'
                 }, status=401)
         except User.DoesNotExist:
-            print(f"User not found: {user_email}, trying company login")
+            print(f"User not found: {user_email_or_username}, trying company login")
             pass
         except Exception as user_error:
             print(f"Error during user authentication: {str(user_error)}")
@@ -1018,7 +1055,7 @@ def login(request):
                 }, status=401)
             
             # Validate credentials: Compare user input with company credentials
-            email_match = company.email.lower().strip() == user_email.lower().strip()
+            email_match = company.email.lower().strip() == user_email_or_username.lower().strip()
             # Compare passwords (strip whitespace to handle edge cases)
             password_match = (company.password or '').strip() == (user_password or '').strip()
             
@@ -1474,7 +1511,7 @@ def list_clients(request):
                 sent_ids = sent_by_email.get(client.email, set())
                 return len(draft_ids | sent_ids)
 
-            # Build response with created_by information
+            # Build response with created_by and updated_by information
             clients_list = []
             for client in clients:
                 created_by_name = "-"  # Default for existing customers without created_by info
@@ -1493,6 +1530,22 @@ def list_clients(request):
                     except User.DoesNotExist:
                         created_by_name = 'User'
                 
+                updated_by_name = "-"  # Default for customers that haven't been updated yet
+                if client.updated_by_type == 'company':
+                    try:
+                        from .models import Company
+                        company = Company.get_company()
+                        updated_by_name = company.company_name or company.brand_name or 'Company'
+                    except Exception:
+                        updated_by_name = 'Company'
+                elif client.updated_by_type == 'user' and client.updated_by_user_id:
+                    try:
+                        from .models import User
+                        updater_user = User.objects.get(id=client.updated_by_user_id)
+                        updated_by_name = updater_user.name or updater_user.email or 'User'
+                    except User.DoesNotExist:
+                        updated_by_name = 'User'
+                
                 clients_list.append({
                     'id': client.id,
                     'customer_name': client.customer_name,
@@ -1503,8 +1556,9 @@ def list_clients(request):
                     'is_active': client.is_active,
                     'quotation_sent_count': total_quotations_for_client(client),
                     'created_by': created_by_name or "-",
-                    'created_at': client.created_at.isoformat(),
-                    'updated_at': client.updated_at.isoformat()
+                    'created_at': client.created_at.isoformat() if client.created_at else None,
+                    'updated_by': updated_by_name or "-",
+                    'updated_at': client.updated_at.isoformat() if client.updated_at else None,
                 })
 
             return JsonResponse({
@@ -1648,6 +1702,14 @@ def client_detail(request, client_id):
                     'error': 'Customer with this email already exists'
                 }, status=400)
             
+            # Get user info from token to track who updated
+            user_info = get_user_from_token(request)
+            updated_by_type = None
+            updated_by_user_id = None
+            if user_info:
+                updated_by_type = user_info.get('user_type', 'user')
+                updated_by_user_id = user_info.get('user_id')
+            
             # Update customer
             client.customer_name = customer_name
             client.company_name = company_name
@@ -1657,6 +1719,10 @@ def client_detail(request, client_id):
             # If is_active is provided in payload, update it; otherwise keep current value
             if 'is_active' in data:
                 client.is_active = bool(data.get('is_active'))
+            # Track who updated
+            if updated_by_type:
+                client.updated_by_type = updated_by_type
+                client.updated_by_user_id = updated_by_user_id
             client.save()
             
             return JsonResponse({
@@ -1787,6 +1853,12 @@ def client_quotations(request, client_id):
             created_by_type = qdata.get('created_by_type', 'company')
             created_by_user_id = qdata.get('created_by_user_id')
             user_name = _get_creator_name(created_by_type, created_by_user_id)
+            
+            # Get updated_by information
+            updated_by_type = qdata.get('updated_by_type', created_by_type)
+            updated_by_user_id = qdata.get('updated_by_user_id', created_by_user_id)
+            updated_by_name = _get_creator_name(updated_by_type, updated_by_user_id)
+            
             quotations_list.append({
                 'id': quotation.id,
                 'quotation_number': quotation.quotation_number,
@@ -1795,6 +1867,10 @@ def client_quotations(request, client_id):
                 'sent_at': quotation.created_at.isoformat() if quotation.created_at else None,
                 'send_type': None,
                 'user_name': user_name,
+                'created_by': user_name,
+                'created_at': quotation.created_at.isoformat() if quotation.created_at else None,
+                'updated_by': updated_by_name,
+                'updated_at': quotation.updated_at.isoformat() if quotation.updated_at else None,
             })
 
         # 2) Quotations sent to this client (by email); user_id on send = who sent it (None = company)
@@ -1810,6 +1886,12 @@ def client_quotations(request, client_id):
             grand_total = quotation_data.get('grand_total', 0)
             status = quotation_data.get('status', 'submitted')
             user_name = _get_creator_name('company' if send.user_id is None else 'user', send.user_id)
+            
+            # Get updated_by information from quotation_data, fallback to creator
+            updated_by_type = quotation_data.get('updated_by_type', 'company' if send.user_id is None else 'user')
+            updated_by_user_id = quotation_data.get('updated_by_user_id', send.user_id)
+            updated_by_name = _get_creator_name(updated_by_type, updated_by_user_id)
+            
             quotations_list.append({
                 'id': quotation.id,
                 'quotation_number': quotation.quotation_number,
@@ -1818,6 +1900,10 @@ def client_quotations(request, client_id):
                 'sent_at': send.sent_at.isoformat(),
                 'send_type': send.send_type,
                 'user_name': user_name,
+                'created_by': user_name,
+                'created_at': quotation.created_at.isoformat() if quotation.created_at else None,
+                'updated_by': updated_by_name,
+                'updated_at': quotation.updated_at.isoformat() if quotation.updated_at else None,
             })
 
         # Sort: most recent first (use sent_at / created_at)
@@ -1863,7 +1949,8 @@ def list_users(request):
                 users = users.filter(
                     Q(email__icontains=search_query) | 
                     Q(name__icontains=search_query) |
-                    Q(phone__icontains=search_query)
+                    Q(phone__icontains=search_query) |
+                    Q(username__icontains=search_query)
                 )
             
             # Build response with created_by information
@@ -1907,6 +1994,7 @@ def list_users(request):
         try:
             data = json.loads(request.body)
             email = data.get('email', '').strip()
+            username = data.get('username', '').strip() or None
             password = data.get('password', '').strip()
             name = data.get('name', '').strip()
             phone = data.get('phone', '').strip()
@@ -1950,6 +2038,13 @@ def list_users(request):
                     'error': 'User with this email already exists'
                 }, status=400)
             
+            # Check if username already exists (if provided)
+            if username and User.objects.filter(username=username).exists():
+                return JsonResponse({
+                    'success': False,
+                    'error': 'User with this username already exists'
+                }, status=400)
+            
             # Get creator information from token
             creator_info = get_user_from_token(request)
             created_by_type = None
@@ -1967,6 +2062,7 @@ def list_users(request):
             # Create user with hashed password
             user = User(
                 email=email,
+                username=username,
                 name=name,
                 phone=phone,
                 is_active=is_active,
@@ -2033,10 +2129,19 @@ def user_detail(request, user_id):
         try:
             data = json.loads(request.body)
             email = data.get('email', '').strip()
+            username = data.get('username', '').strip() or None
             name = data.get('name', '').strip()
             phone = data.get('phone', '').strip()
             password = data.get('password', '').strip()
             is_active = data.get('is_active', True)
+            
+            # Get user info from token to track who updated
+            user_info = get_user_from_token(request)
+            updated_by_type = None
+            updated_by_user_id = None
+            if user_info:
+                updated_by_type = user_info.get('user_type', 'user')
+                updated_by_user_id = user_info.get('user_id')
             
             # Validation
             if not email:
@@ -2060,11 +2165,22 @@ def user_detail(request, user_id):
                     'error': 'User with this email already exists'
                 }, status=400)
             
+            # Check if username already exists (if provided, excluding current user)
+            if username and User.objects.filter(username=username).exclude(id=user_id).exists():
+                return JsonResponse({
+                    'error': 'User with this username already exists'
+                }, status=400)
+            
             # Update user
             user.email = email
+            user.username = username
             user.name = name
             user.phone = phone
             user.is_active = is_active
+            # Track who updated
+            if updated_by_type:
+                user.updated_by_type = updated_by_type
+                user.updated_by_user_id = updated_by_user_id
             
             # Update password if provided
             if password:
@@ -2087,6 +2203,7 @@ def user_detail(request, user_id):
                 'user': {
                     'id': user.id,
                     'name': user.name,
+                    'username': user.username or "",
                     'email': user.email,
                     'phone': user.phone,
                     'active': user.is_active,
@@ -2179,7 +2296,8 @@ def get_all_users(request):
             users = users.filter(
                 Q(email__icontains=search) | 
                 Q(name__icontains=search) |
-                Q(phone__icontains=search)
+                Q(phone__icontains=search) |
+                Q(username__icontains=search)
             )
         
         # Apply active filter
@@ -2195,7 +2313,7 @@ def get_all_users(request):
         offset = (page - 1) * limit
         users = users[offset:offset + limit]
         
-        # Build response with created_by information
+        # Build response with created_by and updated_by information
         users_list = []
         for user in users:
             created_by_name = "-"  # Default for existing users without created_by info
@@ -2213,13 +2331,32 @@ def get_all_users(request):
                 except User.DoesNotExist:
                     created_by_name = 'User'
             
+            updated_by_name = "-"  # Default for users that haven't been updated yet
+            if user.updated_by_type == 'company':
+                try:
+                    from .models import Company
+                    company = Company.get_company()
+                    updated_by_name = company.company_name or company.brand_name or 'Company'
+                except Exception:
+                    updated_by_name = 'Company'
+            elif user.updated_by_type == 'user' and user.updated_by_user_id:
+                try:
+                    updater_user = User.objects.get(id=user.updated_by_user_id)
+                    updated_by_name = updater_user.name or updater_user.email or 'User'
+                except User.DoesNotExist:
+                    updated_by_name = 'User'
+            
             users_list.append({
                 'id': user.id,
                 'name': user.name,
+                'username': user.username or "",
                 'email': user.email,
                 'phone': user.phone,
                 'active': user.is_active,
                 'created_by': created_by_name or "-",
+                'created_at': user.created_at.isoformat() if user.created_at else None,
+                'updated_by': updated_by_name or "-",
+                'updated_at': user.updated_at.isoformat() if user.updated_at else None,
             })
         
         return JsonResponse({
@@ -2274,7 +2411,20 @@ def update_user_status(request, user_id):
     
     try:
         user = User.objects.get(id=user_id)
+        
+        # Get user info from token to track who updated
+        user_info = get_user_from_token(request)
+        updated_by_type = None
+        updated_by_user_id = None
+        if user_info:
+            updated_by_type = user_info.get('user_type', 'user')
+            updated_by_user_id = user_info.get('user_id')
+        
         user.is_active = not user.is_active
+        # Track who updated
+        if updated_by_type:
+            user.updated_by_type = updated_by_type
+            user.updated_by_user_id = updated_by_user_id
         user.save()
         
         return JsonResponse({
@@ -2442,6 +2592,18 @@ Best regards,
                     quotation_obj = Quotation.objects.get(id=quotation_id)
                     qdata = quotation_obj.quotation_data or {}
                     qdata['status'] = 'submitted'
+                    
+                    # Track who updated this quotation
+                    if user_info:
+                        updated_by_type = user_info.get('user_type', 'company')
+                        updated_by_user_id = user_info.get('user_id')
+                        if updated_by_type == 'user' and updated_by_user_id:
+                            qdata['updated_by_type'] = 'user'
+                            qdata['updated_by_user_id'] = updated_by_user_id
+                        else:
+                            qdata['updated_by_type'] = 'company'
+                            qdata['updated_by_user_id'] = None
+                    
                     quotation_obj.quotation_data = qdata
                     quotation_obj.save()
                     QuotationSend.objects.create(
@@ -2529,6 +2691,18 @@ def send_quotation_whatsapp(request):
             user_id = user_info.get('user_id')
         qdata = quotation_obj.quotation_data or {}
         qdata['status'] = 'submitted'
+        
+        # Track who updated this quotation
+        if user_info:
+            updated_by_type = user_info.get('user_type', 'company')
+            updated_by_user_id = user_info.get('user_id')
+            if updated_by_type == 'user' and updated_by_user_id:
+                qdata['updated_by_type'] = 'user'
+                qdata['updated_by_user_id'] = updated_by_user_id
+            else:
+                qdata['updated_by_type'] = 'company'
+                qdata['updated_by_user_id'] = None
+        
         quotation_obj.quotation_data = qdata
         quotation_obj.save()
         phone_for_wa = recipient_phone
@@ -2568,6 +2742,19 @@ def update_quotation_status(request, quotation_id):
         quotation_obj = Quotation.objects.get(id=quotation_id)
         qdata = quotation_obj.quotation_data or {}
         qdata['status'] = new_status
+        
+        # Track who updated this quotation
+        user_info = get_user_from_token(request)
+        if user_info:
+            updated_by_type = user_info.get('user_type', 'company')
+            updated_by_user_id = user_info.get('user_id')
+            if updated_by_type == 'user' and updated_by_user_id:
+                qdata['updated_by_type'] = 'user'
+                qdata['updated_by_user_id'] = updated_by_user_id
+            else:
+                qdata['updated_by_type'] = 'company'
+                qdata['updated_by_user_id'] = None
+        
         quotation_obj.quotation_data = qdata
         quotation_obj.save()
         return JsonResponse({'success': True, 'status': new_status})
@@ -2620,42 +2807,13 @@ def dashboard_stats(request):
             # Regular users see only their sends
             quotation_send_filter['user_id'] = user_id
         
-        # KPI Cards - filter based on user type
-        # Base quotation queryset for filtering
-        if user_type == 'company':
-            # Company admin sees only admin quotations (user_id IS NULL)
-            base_quotations = Quotation.objects.filter(
-                sends__user_id__isnull=True
-            ).distinct()
-            total_customers = Client.objects.count()
-            active_customers = Client.objects.filter(is_active=True).count()
-            inactive_customers = Client.objects.filter(is_active=False).count()
-            total_users = User.objects.filter(is_active=True).count()
-        elif user_type == 'user' and is_admin:
-            # User with full access sees all quotations (from all users and admin)
-            base_quotations = Quotation.objects.all()
-            total_customers = Client.objects.count()
-            active_customers = Client.objects.filter(is_active=True).count()
-            inactive_customers = Client.objects.filter(is_active=False).count()
-            total_users = User.objects.filter(is_active=True).count()
-        elif user_type == 'user' and user_id:
-            # Regular users see only their data
-            base_quotations = Quotation.objects.filter(
-                sends__user_id=user_id
-            ).distinct()
-            # Users see all customers (they can send to any customer)
-            total_customers = Client.objects.count()
-            active_customers = Client.objects.filter(is_active=True).count()
-            inactive_customers = Client.objects.filter(is_active=False).count()
-            # For users, show count of quotations they sent, not user count
-            total_users = QuotationSend.objects.filter(user_id=user_id).count()
-        else:
-            # Fallback for unauthenticated or invalid users
-            base_quotations = Quotation.objects.none()
-            total_customers = 0
-            active_customers = 0
-            inactive_customers = 0
-            total_users = 0
+        # KPI Cards - GLOBAL/COMPANY-BASED (all users see same totals)
+        # Always show ALL quotations regardless of user type - global company totals
+        base_quotations = Quotation.objects.all()
+        total_customers = Client.objects.count()
+        active_customers = Client.objects.filter(is_active=True).count()
+        inactive_customers = Client.objects.filter(is_active=False).count()
+        total_users = User.objects.filter(is_active=True).count()
         
         # Calculate KPIs from base_quotations
         total_quotations = base_quotations.count()
@@ -2803,6 +2961,44 @@ def dashboard_stats(request):
             )
             quotation_count = all_quotation_sends.count()  # Universal count - all users' sends
             
+            # Calculate submitted quotation total for this customer
+            # Get all quotations linked to this customer (via client_id or recipient_email)
+            submitted_total = 0
+            processed_quotation_ids = set()
+            
+            # Method 1: Quotations with client_id matching this customer
+            quotations_by_client_id = Quotation.objects.filter(
+                quotation_data__client_id=client.id
+            )
+            for quotation in quotations_by_client_id:
+                quotation_data = quotation.quotation_data or {}
+                status = quotation_data.get('status', 'draft').lower()
+                if status == 'submitted':
+                    grand_total = quotation.get_grand_total()
+                    try:
+                        submitted_total += float(grand_total) if grand_total else 0
+                        processed_quotation_ids.add(quotation.id)
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Method 2: Quotations sent to this customer's email (via QuotationSend)
+            quotations_by_email = Quotation.objects.filter(
+                sends__recipient_email__iexact=client.email
+            ).distinct()
+            for quotation in quotations_by_email:
+                # Skip if already counted via client_id
+                if quotation.id in processed_quotation_ids:
+                    continue
+                quotation_data = quotation.quotation_data or {}
+                status = quotation_data.get('status', 'draft').lower()
+                if status == 'submitted':
+                    grand_total = quotation.get_grand_total()
+                    try:
+                        submitted_total += float(grand_total) if grand_total else 0
+                        processed_quotation_ids.add(quotation.id)
+                    except (ValueError, TypeError):
+                        pass
+            
             # Get user breakdown for this customer (who sent how many)
             # Customer card is UNIVERSAL - show breakdown by ALL users for everyone
             user_breakdown = []
@@ -2829,6 +3025,7 @@ def dashboard_stats(request):
                 'email': client.email,
                 'phone_number': client.phone_number or '',
                 'total_quotation': quotation_count,
+                'submitted_value': round(submitted_total, 2),  # Total value of submitted quotations
                 'status': 'Active' if client.is_active else 'Inactive',
                 'user_breakdown': user_breakdown  # Who sent how many
             })
@@ -2920,6 +3117,27 @@ def dashboard_customer_list(request):
             sent_ids = sent_by_email.get(client.email, set())
             return len(draft_ids | sent_ids)
 
+        def submitted_value_for_client(client):
+            """Calculate total value of submitted quotations for this client."""
+            submitted_total = 0
+            # Get all quotation IDs for this client
+            draft_ids = draft_by_client.get(client.id, set())
+            sent_ids = sent_by_email.get(client.email, set())
+            all_quotation_ids = draft_ids | sent_ids
+            
+            # Get all quotations and sum submitted values
+            quotations = Quotation.objects.filter(id__in=all_quotation_ids)
+            for quotation in quotations:
+                quotation_data = quotation.quotation_data or {}
+                status = quotation_data.get('status', 'draft').lower()
+                if status == 'submitted':
+                    grand_total = quotation.get_grand_total()
+                    try:
+                        submitted_total += float(grand_total) if grand_total else 0
+                    except (ValueError, TypeError):
+                        pass
+            return submitted_total
+
         # Latest customers first, limit for dashboard (default 20, max 100)
         try:
             limit = min(int(request.GET.get('limit', 20)), 100)
@@ -2935,6 +3153,7 @@ def dashboard_customer_list(request):
                 'email': client.email,
                 'phone': client.phone_number or '',
                 'totalQuotation': total_quotations_for_client(client),
+                'submittedValue': round(submitted_value_for_client(client), 2),  # Total value of submitted quotations
                 'status': 'Active' if client.is_active else 'Inactive',
             }
             for client in clients

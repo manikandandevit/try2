@@ -240,6 +240,8 @@ class Client(models.Model):
     is_active = models.BooleanField(default=True, help_text="Is this customer active/enabled in dashboard toggle")
     created_by_type = models.CharField(max_length=20, blank=True, null=True, help_text="Type of creator: 'company' or 'user'")
     created_by_user_id = models.IntegerField(blank=True, null=True, help_text="ID of user who created this customer (if created by user)")
+    updated_by_type = models.CharField(max_length=20, blank=True, null=True, help_text="Type of updater: 'company' or 'user'")
+    updated_by_user_id = models.IntegerField(blank=True, null=True, help_text="ID of user who last updated this customer (if updated by user)")
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -254,6 +256,7 @@ class Client(models.Model):
 
 class User(models.Model):
     """Model to store user information with authentication."""
+    username = models.CharField(max_length=255, unique=True, blank=True, null=True, help_text="Username (optional, for login)")
     email = models.EmailField(unique=True, help_text="User Email")
     password = models.CharField(max_length=255, help_text="Hashed Password")
     name = models.CharField(max_length=255, help_text="Full Name")
@@ -261,6 +264,8 @@ class User(models.Model):
     is_active = models.BooleanField(default=True, help_text="Active Status")
     created_by_type = models.CharField(max_length=20, blank=True, null=True, help_text="Type of creator: 'company' or 'user'")
     created_by_user_id = models.IntegerField(blank=True, null=True, help_text="ID of user who created this user (if created by user)")
+    updated_by_type = models.CharField(max_length=20, blank=True, null=True, help_text="Type of updater: 'company' or 'user'")
+    updated_by_user_id = models.IntegerField(blank=True, null=True, help_text="ID of user who last updated this user (if updated by user)")
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     
