@@ -272,6 +272,348 @@ class FuzzyMatcher:
         return None
 
 
+class ConversationHistoryService:
+    """Service to search past conversations and extract pricing information."""
+    
+    @staticmethod
+    def search_past_conversations(service_name: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Search past conversations for similar services and extract pricing.
+        
+        Args:
+            service_name: The service name to search for
+            limit: Maximum number of past conversations to return
+            
+        Returns:
+            List of dictionaries with service info, pricing, and conversation context
+        """
+        from .models import Quotation
+        
+        if not service_name or not service_name.strip():
+            return []
+        
+        service_name_lower = service_name.lower().strip()
+        
+        # Get all quotations with conversation history
+        quotations = Quotation.objects.filter(
+            quotation_data__conversation_history__isnull=False
+        ).exclude(
+            quotation_data__conversation_history=[]
+        ).order_by('-updated_at')[:100]  # Check last 100 quotations
+        
+        matching_conversations = []
+        
+        for quotation in quotations:
+            qdata = quotation.quotation_data or {}
+            conversation_history = qdata.get('conversation_history', []) or []
+            services = qdata.get('services', []) or []
+            
+            # Check if conversation mentions the service
+            conversation_text = ' '.join([
+                msg.get('content', '') for msg in conversation_history
+            ]).lower()
+            
+            # Check if service name appears in conversation or in services
+            # Use word-based matching for better results (e.g., "car rent" matches "car rental")
+            service_words = set(service_name_lower.split())
+            service_found = False
+            
+            # Check if at least 50% of service words appear in conversation
+            conversation_words = set(conversation_text.split())
+            matching_words = service_words.intersection(conversation_words)
+            if len(matching_words) >= max(1, len(service_words) * 0.5):
+                service_found = True
+            
+            # Also check direct substring match
+            if service_name_lower in conversation_text or any(word in conversation_text for word in service_words if len(word) > 2):
+                service_found = True
+            
+            # Also check services in quotation data using fuzzy matching
+            for service in services:
+                service_name_in_quote = service.get('service_name', '').lower()
+                
+                # Direct match
+                if service_name_lower in service_name_in_quote or service_name_in_quote in service_name_lower:
+                    service_found = True
+                    # Extract pricing from this service
+                    matching_conversations.append({
+                        'service_name': service.get('service_name', ''),
+                        'quantity': service.get('quantity', 0),
+                        'unit_price': service.get('unit_price', 0) or service.get('price', 0),
+                        'amount': service.get('amount', 0),
+                        'conversation_snippet': conversation_text[:200] if conversation_text else '',
+                        'quotation_id': quotation.id,
+                        'quotation_number': quotation.quotation_number,
+                        'updated_at': quotation.updated_at.isoformat() if quotation.updated_at else None
+                    })
+                    break
+                
+                # Word-based fuzzy match
+                service_words_quote = set(service_name_in_quote.split())
+                matching_words = service_words.intersection(service_words_quote)
+                if len(matching_words) >= max(1, min(len(service_words), len(service_words_quote)) * 0.6):
+                    service_found = True
+                    # Extract pricing from this service
+                    matching_conversations.append({
+                        'service_name': service.get('service_name', ''),
+                        'quantity': service.get('quantity', 0),
+                        'unit_price': service.get('unit_price', 0) or service.get('price', 0),
+                        'amount': service.get('amount', 0),
+                        'conversation_snippet': conversation_text[:200] if conversation_text else '',
+                        'quotation_id': quotation.id,
+                        'quotation_number': quotation.quotation_number,
+                        'updated_at': quotation.updated_at.isoformat() if quotation.updated_at else None
+                    })
+                    break
+            
+            # If found in conversation but not in services, try to extract from conversation text
+            if service_found and not any(m.get('quotation_id') == quotation.id for m in matching_conversations):
+                # Try to extract pricing from conversation
+                price_info = ConversationHistoryService._extract_pricing_from_text(conversation_text, service_name_lower)
+                if price_info:
+                    matching_conversations.append({
+                        'service_name': service_name,
+                        'quantity': price_info.get('quantity', 0),
+                        'unit_price': price_info.get('unit_price', 0),
+                        'amount': price_info.get('amount', 0),
+                        'conversation_snippet': conversation_text[:200],
+                        'quotation_id': quotation.id,
+                        'quotation_number': quotation.quotation_number,
+                        'updated_at': quotation.updated_at.isoformat() if quotation.updated_at else None,
+                        'extracted_from_text': True
+                    })
+        
+        # Intelligent sorting by relevance
+        def calculate_relevance_score(conv):
+            """Calculate relevance score for a conversation match."""
+            conv_service = conv.get('service_name', '').lower()
+            score = 0
+            
+            # Exact match gets highest score
+            if service_name_lower == conv_service:
+                score += 100
+            # Substring match
+            elif service_name_lower in conv_service or conv_service in service_name_lower:
+                score += 80
+            # Word overlap score
+            else:
+                conv_words = set(conv_service.split())
+                query_words = set(service_name_lower.split())
+                overlap = len(query_words.intersection(conv_words))
+                if len(query_words) > 0:
+                    score += (overlap / len(query_words)) * 60
+            
+            # Recency bonus (more recent = higher score)
+            # This is handled by sorting by updated_at after score
+            
+            return score
+        
+        # Sort by relevance score (highest first), then by recency
+        matching_conversations.sort(
+            key=lambda x: (
+                -calculate_relevance_score(x),  # Negative for descending order
+                x.get('updated_at', '') or ''  # Most recent first
+            ),
+            reverse=True
+        )
+        
+        return matching_conversations[:limit]
+    
+    @staticmethod
+    def _extract_pricing_from_text(text: str, service_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Intelligently extract pricing information from conversation text.
+        Works for ANY service type, not just specific examples.
+        """
+        import re
+        
+        # Create flexible service pattern - match any word from service name
+        service_words = [word for word in service_name.split() if len(word) > 2]
+        if service_words:
+            # Match if any significant word from service name appears
+            service_pattern = '|'.join(re.escape(word) for word in service_words)
+        else:
+            service_pattern = re.escape(service_name)
+        
+        # Also try without service name pattern for general number extraction
+        # This helps when service name variations exist
+        
+        # Patterns to find prices and quantities
+        # Pattern 1: Service with time/unit quantity and price
+        # Examples: "car rent 3 days 300", "cleaning 2 visits 500", "website 5 pages 2000"
+        # Match: number + (days/hours/units/items/pages/visits/etc) + price
+        time_units = r'(?:days?|day|hours?|hour|units?|unit|items?|item|pages?|page|visits?|visit|sessions?|session|months?|month|years?|year|sqft|sq\.?\s*ft|meters?|meter|kg|kgs?|liters?|liter)'
+        pattern1 = rf'(?:{service_pattern}).*?(\d+)\s*{time_units}.*?(?:₹|rs\.?|rupees?|cost|price|rate)?\s*(\d+(?:\.\d+)?)'
+        match1 = re.search(pattern1, text, re.IGNORECASE)
+        if match1:
+            quantity = int(match1.group(1))
+            price = float(match1.group(2))
+            # Intelligent price interpretation:
+            # If price is significantly larger than quantity, it's likely total amount
+            # Otherwise, it might be unit price
+            if price > quantity * 50:  # More intelligent threshold
+                unit_price = price / quantity if quantity > 0 else price
+                amount = price
+            elif price > quantity * 5:
+                # Could be either - check context for "per" or "total"
+                if 'per' in text.lower() or 'each' in text.lower():
+                    unit_price = price
+                    amount = price * quantity
+                else:
+                    unit_price = price / quantity if quantity > 0 else price
+                    amount = price
+            else:
+                unit_price = price
+                amount = price * quantity
+            return {
+                'quantity': quantity,
+                'unit_price': round(unit_price, 2),
+                'amount': round(amount, 2)
+            }
+        
+        # Pattern 2: "service name quantity X price Y" or "service name X Y" (two numbers)
+        pattern2 = rf'(?:{service_pattern}).*?(?:quantity|qty)\s*(\d+).*?(?:price|rate|cost|₹|rs\.?|rupees?)\s*(?:₹|rs\.?|rupees?)?\s*(\d+(?:\.\d+)?)'
+        match2 = re.search(pattern2, text, re.IGNORECASE)
+        if match2:
+            quantity = int(match2.group(1))
+            price = float(match2.group(2))
+            return {
+                'quantity': quantity,
+                'unit_price': price / quantity if quantity > 0 else price,
+                'amount': price
+            }
+        
+        # Pattern 3: "service name X Y" where X is quantity and Y is price (simple pattern)
+        # Example: "car rent 3 300" or "cleaning service 2 500"
+        pattern3 = rf'(?:{service_pattern}).*?\b(\d+)\s+(\d+(?:\.\d+)?)\b'
+        match3 = re.search(pattern3, text, re.IGNORECASE)
+        if match3:
+            first_num = int(match3.group(1))
+            second_num = float(match3.group(2))
+            # Heuristic: if second number is much larger, it's likely total price
+            if second_num > first_num * 10:
+                return {
+                    'quantity': first_num,
+                    'unit_price': round(second_num / first_num, 2) if first_num > 0 else second_num,
+                    'amount': round(second_num, 2)
+                }
+            else:
+                # Both could be quantity and unit price
+                return {
+                    'quantity': first_num,
+                    'unit_price': round(second_num, 2),
+                    'amount': round(first_num * second_num, 2)
+                }
+        
+        # Pattern 4: "service name ₹X" or "service name X rupees" (single price)
+        pattern4 = rf'(?:{service_pattern}).*?(?:₹|rs\.?|rupees?|cost|price|rate)?\s*(\d+(?:\.\d+)?)'
+        match4 = re.search(pattern4, text, re.IGNORECASE)
+        if match4:
+            price = float(match4.group(1))
+            # Check if "per" is mentioned to determine if it's unit price
+            per_match = re.search(rf'(?:{service_pattern}).*?per\s+(?:day|hour|unit|item|page|visit|session)', text, re.IGNORECASE)
+            if per_match:
+                return {
+                    'quantity': 1,  # Default quantity when "per" is mentioned
+                    'unit_price': round(price, 2),
+                    'amount': round(price, 2)
+                }
+            return {
+                'quantity': 1,
+                'unit_price': round(price, 2),
+                'amount': round(price, 2)
+            }
+        
+        # Pattern 5: General number extraction - find any two numbers near service name
+        # This is a fallback for unusual patterns
+        numbers_near_service = re.findall(rf'(?:{service_pattern}).*?(\d+(?:\.\d+)?).*?(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+        if numbers_near_service:
+            for num_pair in numbers_near_service:
+                first_num = float(num_pair[0])
+                second_num = float(num_pair[1])
+                # Heuristic: first number is usually quantity, second is price
+                if first_num < 1000 and second_num > first_num:
+                    return {
+                        'quantity': int(first_num),
+                        'unit_price': round(second_num / first_num, 2) if first_num > 0 else second_num,
+                        'amount': round(second_num, 2)
+                    }
+        
+        return None
+    
+    @staticmethod
+    def get_suggested_pricing(service_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Intelligently get suggested pricing for ANY service based on past conversations.
+        Uses weighted average and intelligent filtering.
+        
+        Returns:
+            Dictionary with suggested quantity, unit_price, and amount, or None
+        """
+        past_conversations = ConversationHistoryService.search_past_conversations(service_name, limit=10)
+        
+        if not past_conversations:
+            return None
+        
+        # Intelligent pricing calculation with weights
+        weighted_unit_prices = []
+        quantities = []
+        valid_conversations = []
+        
+        for conv in past_conversations:
+            unit_price = conv.get('unit_price', 0)
+            quantity = conv.get('quantity', 0)
+            
+            # Only consider valid pricing
+            if unit_price > 0:
+                # Weight by relevance (exact matches weighted higher)
+                conv_service = conv.get('service_name', '').lower()
+                service_name_lower = service_name.lower()
+                
+                if service_name_lower == conv_service:
+                    weight = 3.0  # Exact match gets 3x weight
+                elif service_name_lower in conv_service or conv_service in service_name_lower:
+                    weight = 2.0  # Substring match gets 2x weight
+                else:
+                    weight = 1.0  # Fuzzy match gets normal weight
+                
+                # Add weighted prices
+                for _ in range(int(weight)):
+                    weighted_unit_prices.append(unit_price)
+                    quantities.append(quantity)
+                    valid_conversations.append(conv)
+        
+        if not weighted_unit_prices:
+            return None
+        
+        # Calculate weighted average
+        avg_unit_price = sum(weighted_unit_prices) / len(weighted_unit_prices) if weighted_unit_prices else 0
+        
+        # For quantity, use median (more stable than average)
+        quantities_sorted = sorted(quantities)
+        median_quantity = quantities_sorted[len(quantities_sorted) // 2] if quantities_sorted else 1
+        
+        # Also calculate mode (most common quantity)
+        from collections import Counter
+        quantity_counts = Counter(quantities)
+        mode_quantity = quantity_counts.most_common(1)[0][0] if quantity_counts else median_quantity
+        
+        # Use mode if it's reasonable, otherwise use median
+        suggested_quantity = mode_quantity if mode_quantity > 0 else median_quantity
+        
+        return {
+            'suggested_unit_price': round(avg_unit_price, 2),
+            'suggested_quantity': suggested_quantity,
+            'suggested_amount': round(avg_unit_price * suggested_quantity, 2),
+            'based_on_conversations': len(valid_conversations),
+            'past_examples': past_conversations[:5],  # Top 5 examples for better context
+            'price_range': {
+                'min': round(min(weighted_unit_prices), 2) if weighted_unit_prices else 0,
+                'max': round(max(weighted_unit_prices), 2) if weighted_unit_prices else 0
+            }
+        }
+
+
 class ConversationOptimizer:
     """Optimize conversation history for better context management."""
     
@@ -512,24 +854,75 @@ grand_total = subtotal + gst_amount + shipping
 Round all monetary values to 2 decimal places.
 
 ----------------------------------
+INTELLIGENT PRICING FROM PAST CONVERSATIONS (CRITICAL)
+----------------------------------
+You have access to past conversation history that contains pricing information for similar services.
+
+WHEN USER ASKS TO ADD A SERVICE:
+1. If past pricing history is provided in the context (look for "PAST PRICING HISTORY" section):
+   - USE the suggested pricing from past conversations
+   - This pricing is based on real past quotations, so it's reliable
+   - If user doesn't specify quantity/price, AUTOMATICALLY use the suggested values
+   - Mention in your message that you're using pricing from past conversations
+   
+2. INTELLIGENT PRICING EXTRACTION:
+   - If user provides partial info (e.g., "car rent service" without price):
+     * Check past pricing history first
+     * If found, use suggested_unit_price and suggested_quantity
+     * Add service with those values automatically
+     * Say: "I've added [service] based on past pricing: ₹[price] per unit, quantity [qty]"
+   
+   - If user provides full info (e.g., "car rent 3 days 300"):
+     * Extract: service_name="car rent", quantity=3, unit_price=100 (300/3)
+     * Use user's values (they override past pricing)
+   
+   - If user provides service name only (e.g., "cleaning service"):
+     * Check past pricing history
+     * If found, use suggested pricing
+     * If not found, add with quantity=0, unit_price=0 and ask user
+
+3. SMART PRICE INTERPRETATION:
+   - "service 3 days 300" → quantity=3, total=300, unit_price=100/day
+   - "service 3 300" → quantity=3, if 300 > 30 then total=300, unit_price=100; else unit_price=300
+   - "service ₹500" → quantity=1, unit_price=500
+   - "service per day 500" → unit_price=500, quantity=1 (default)
+   - "service 5 units at ₹100 each" → quantity=5, unit_price=100
+
+4. LEARNING FROM CONTEXT:
+   - Understand service types intelligently:
+     * "rent", "rental", "hire" → usually time-based (per day/hour)
+     * "cleaning", "maintenance", "service" → usually one-time or per visit
+     * "development", "design", "work" → usually project-based
+   - Adjust unit pricing logic based on service type
+   - Extract quantities from context: "3 days", "5 pages", "2 hours", etc.
+
+----------------------------------
 ADDING SERVICES RULES
 ----------------------------------
 If the user asks to ADD a service:
 
 1. Extract service name from the request (even if incomplete).
-2. Check if quantity and unit_price are provided in the request.
-3. If BOTH quantity and unit_price are provided:
+2. Check if past pricing history is available (look for "PAST PRICING HISTORY" in context).
+3. Check if quantity and unit_price are provided in the request.
+4. PRIORITY ORDER:
+   a) User-provided values (highest priority)
+   b) Past pricing history suggestions (if available)
+   c) Default values (quantity=0, unit_price=0)
+5. If BOTH quantity and unit_price are available (from user OR past history):
    - Add the service immediately with those values
    - ALWAYS include "key_features" array with EXACTLY 4 relevant features for that service
    - Generate 4 professional, relevant key features based on the service type
    - Recalculate totals
-4. If quantity OR price is missing (but service name is clear):
-   - ADD the service with default values: quantity=0, unit_price=0
+   - If using past pricing, mention it in your message
+6. If quantity OR price is missing (but service name is clear):
+   - Check past pricing history first
+   - If past pricing available, use it
+   - If not, ADD the service with default values: quantity=0, unit_price=0
    - ALWAYS include "key_features" array with EXACTLY 4 relevant features for that service
    - Generate 4 professional, relevant key features based on the service type
    - Recalculate totals
-   - In your message, inform the user: "I've added [service name] with quantity 0 and price 0. You can modify these values later."
-5. If service name cannot be determined:
+   - In your message, inform the user appropriately
+7. If service name cannot be determined:
    - DO NOT modify quotation JSON
    - Ask a clear follow-up question: "What service would you like to add?"
 
@@ -583,6 +976,83 @@ IMPORTANT: When parsing "add service X Quantity Y price Z" or "create Quotation 
 - Do NOT include "Quotation For", "Service For", "create a", "add a" in the service name
 - Do NOT include "Quantity" or "qty" in the service name
 - Extract the numeric values for quantity and price correctly
+
+----------------------------------
+SCENARIO-BASED QUOTATION GENERATION (CRITICAL)
+----------------------------------
+You are a professional Quotation Generator AI. When a user provides a SCENARIO or DESCRIPTION of services needed, you MUST automatically parse it and generate a complete quotation.
+
+SCENARIO DETECTION:
+A scenario is a natural language description that contains:
+- Service descriptions (e.g., "Travel from Madurai to Chennai", "Website development")
+- Pricing information (e.g., "Car rent per day: 500", "Cost per page: 2000")
+- Quantity information (e.g., "Days: 2", "Pages: 5")
+- Multiple services in one description
+
+WHEN USER PROVIDES A SCENARIO:
+1. Parse the entire scenario to extract ALL services, quantities, and prices
+2. Create services for EACH item mentioned
+3. Calculate totals automatically
+4. Generate appropriate key_features for each service (EXACTLY 4 features per service)
+5. Set default GST to 18% if not specified
+6. Set shipping to 0 if not specified
+7. Return the COMPLETE quotation JSON with all services
+
+SCENARIO PARSING RULES:
+- Extract service names from descriptions (e.g., "Car Rental", "Driver Charge", "Website Pages", "Hosting Service")
+- Extract quantities from phrases like "Days: 2", "Pages: 5", "quantity: 3", etc.
+- Extract prices from phrases like "per day: 500", "per page: 2000", "cost: 3000", etc.
+- Handle unit-based pricing (per day, per page, per unit, etc.)
+- Calculate total amount for each service: quantity × unit_price
+
+SCENARIO EXAMPLES:
+
+Example 1:
+Input: "Travel from Madurai to Chennai. Car rent per day: 500. Days: 2. Driver charge per day: 1000"
+Parse:
+- Service 1: "Car Rental" - quantity: 2 (Days), unit_price: 500 (per day), amount: 1000
+- Service 2: "Driver Charge" - quantity: 2 (Days), unit_price: 1000 (per day), amount: 2000
+- Subtotal: 3000
+- GST: 18% = 540
+- Grand Total: 3540
+
+Example 2:
+Input: "Website development. Pages: 5. Cost per page: 2000. Hosting: 3000"
+Parse:
+- Service 1: "Website Pages" - quantity: 5, unit_price: 2000, amount: 10000
+- Service 2: "Hosting Service" - quantity: 1 (Year), unit_price: 3000, amount: 3000
+- Subtotal: 13000
+- GST: 18% = 2340
+- Grand Total: 15340
+
+Example 3:
+Input: "Home renovation. Tiles work: 100 sqft at ₹50 per sqft. Painting: 500 sqft at ₹30 per sqft. Plumbing: ₹5000"
+Parse:
+- Service 1: "Tiles Work" - quantity: 100 (sqft), unit_price: 50, amount: 5000
+- Service 2: "Painting Work" - quantity: 500 (sqft), unit_price: 30, amount: 15000
+- Service 3: "Plumbing Service" - quantity: 1, unit_price: 5000, amount: 5000
+- Subtotal: 25000
+- GST: 18% = 4500
+- Grand Total: 29500
+
+KEY FEATURES FOR SCENARIO-BASED SERVICES:
+- Generate 4 relevant, professional features for each service based on the scenario context
+- Features should match the service type (e.g., travel services, web development, construction, etc.)
+- Make features descriptive and valuable
+
+IMPORTANT SCENARIO RULES:
+1. If the scenario describes a NEW quotation (no existing services), CREATE a fresh quotation
+2. If the scenario is ADDED to existing services, ADD the new services to the existing quotation
+3. Always preserve existing services unless user explicitly says to reset
+4. Extract ALL services mentioned in the scenario - don't miss any
+5. If quantity is not specified but implied (e.g., "Hosting: 3000" implies quantity 1), use quantity: 1
+6. If unit is not clear, use appropriate default (e.g., "Days", "Units", "Items", "Years")
+
+SCENARIO RESPONSE FORMAT:
+Your message should acknowledge the scenario and confirm the quotation was generated:
+"I've created a quotation based on your scenario with [X] services. Total: ₹[amount]"
+
+Then return the complete quotation JSON with all parsed services.
 
 ----------------------------------
 REMOVING SERVICES RULES
@@ -1277,6 +1747,12 @@ Current quotation JSON:
         intent = IntentClassifier.classify(user_message)
         entities = IntentClassifier.extract_entities(user_message)
         
+        # If user is adding a service, check past conversations for pricing suggestions
+        pricing_suggestion = None
+        if intent == 'add' and entities.get('service_name'):
+            service_name = entities['service_name']
+            pricing_suggestion = ConversationHistoryService.get_suggested_pricing(service_name)
+        
         # Check cache for simple queries (view, calculate)
         if intent in ['view', 'calculate']:
             cache_key = self._get_cache_key(user_message, current_quotation)
@@ -1310,6 +1786,54 @@ Current quotation JSON:
         
         # Add conversation history
         messages.extend(optimized_history)
+        
+        # Add intelligent pricing suggestion context if available
+        if pricing_suggestion and intent == 'add' and entities.get('service_name'):
+            suggested_price = pricing_suggestion.get('suggested_unit_price', 0)
+            suggested_qty = pricing_suggestion.get('suggested_quantity', 1)
+            past_count = pricing_suggestion.get('based_on_conversations', 0)
+            past_examples = pricing_suggestion.get('past_examples', [])
+            price_range = pricing_suggestion.get('price_range', {})
+            
+            if suggested_price > 0:
+                examples_text = "\n".join([
+                    f"  - {ex.get('service_name', '')}: {ex.get('quantity', 0)} units × ₹{ex.get('unit_price', 0):,.2f} = ₹{ex.get('amount', 0):,.2f}"
+                    for ex in past_examples[:5]  # Show more examples for better context
+                ])
+                
+                price_range_text = ""
+                if price_range.get('min') and price_range.get('max'):
+                    price_range_text = f"\n- Price range from past: ₹{price_range['min']:,.2f} - ₹{price_range['max']:,.2f} per unit"
+                
+                pricing_context = f"""
+----------------------------------
+INTELLIGENT PRICING FROM PAST CONVERSATIONS
+----------------------------------
+Service: "{entities.get('service_name', '')}"
+
+Based on {past_count} past conversation(s) with similar services, here are intelligent pricing suggestions:
+
+RECOMMENDED PRICING:
+- Suggested unit price: ₹{suggested_price:,.2f} per unit
+- Suggested quantity: {suggested_qty} units
+- Suggested total amount: ₹{suggested_price * suggested_qty:,.2f}
+{price_range_text}
+
+PAST EXAMPLES (for reference):
+{examples_text if examples_text else "No specific examples available."}
+
+INTELLIGENT USAGE RULES:
+1. If user provides NO quantity/price → AUTOMATICALLY use suggested pricing above
+2. If user provides PARTIAL info (only quantity OR only price) → Fill missing value from suggestions
+3. If user provides FULL info (both quantity AND price) → Use user's values (they override suggestions)
+4. Always mention in your message when using past pricing: "Based on past quotations, I've set the price to ₹X"
+
+This pricing is based on REAL past quotations, so it's reliable and intelligent.
+"""
+                messages.append({
+                    "role": "system",
+                    "content": pricing_context
+                })
         
         # Add current quotation context (formatted better)
         services_list = "\n".join([

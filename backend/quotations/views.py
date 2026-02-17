@@ -584,20 +584,16 @@ def get_last_quotation_id(request):
         user_id = user_info.get('user_id')
 
         if user_type == 'user' and user_id:
+            # Regular user: only return quotations created by this user
             q = Quotation.objects.filter(
                 quotation_data__created_by_user_id=user_id
             ).order_by('-updated_at').first()
         else:
-            # Company admin: quotations created by company (or legacy without user)
+            # Company admin: only return quotations created by company admin
+            # Do NOT fallback to any quotation - admin should only see their own quotations
             q = Quotation.objects.filter(
                 quotation_data__created_by_type='company'
             ).order_by('-updated_at').first()
-            if not q:
-                q = Quotation.objects.filter(
-                    quotation_data__created_by_user_id__isnull=True
-                ).order_by('-updated_at').first()
-            if not q:
-                q = Quotation.objects.order_by('-updated_at').first()
 
         return JsonResponse({
             'success': True,
@@ -676,6 +672,7 @@ def sync_conversation_history(request):
         }, status=500)
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 def reset_quotation(request):
     """Reset quotation to empty state."""
@@ -731,11 +728,24 @@ def sync_quotation(request):
                 if 'conversation_history' in quotation and isinstance(quotation.get('conversation_history'), list):
                     qdata['conversation_history'] = quotation['conversation_history']
                 
-                # Track who updated this quotation
+                # Track who created/updated this quotation
                 user_info = get_user_from_token(request)
                 if user_info:
-                    updated_by_type = user_info.get('user_type', 'company')
-                    updated_by_user_id = user_info.get('user_id')
+                    user_type = user_info.get('user_type', 'company')
+                    user_id = user_info.get('user_id')
+                    
+                    # Set created_by fields if not already set (first time saving)
+                    if 'created_by_type' not in qdata or not qdata.get('created_by_type'):
+                        if user_type == 'user' and user_id:
+                            qdata['created_by_type'] = 'user'
+                            qdata['created_by_user_id'] = user_id
+                        else:
+                            qdata['created_by_type'] = 'company'
+                            qdata['created_by_user_id'] = None
+                    
+                    # Track who updated this quotation
+                    updated_by_type = user_type
+                    updated_by_user_id = user_id
                     if updated_by_type == 'user' and updated_by_user_id:
                         qdata['updated_by_type'] = 'user'
                         qdata['updated_by_user_id'] = updated_by_user_id
@@ -1036,7 +1046,7 @@ def login(request):
         
         try:
             # First, try to find company by exact email match
-            company = Company.objects.filter(email__iexact=user_email.strip()).first()
+            company = Company.objects.filter(email__iexact=user_email_or_username.strip()).first()
             
             # If no company found with matching email, try to get any company with email
             if not company:
@@ -1048,7 +1058,7 @@ def login(request):
             
             # Check if company credentials are configured
             if not company or not company.email or not company.password:
-                print(f"Login failed: Company not found or credentials not configured. Email: {user_email}")
+                print(f"Login failed: Company not found or credentials not configured. Email: {user_email_or_username}")
                 return JsonResponse({
                     'success': False,
                     'error': 'Invalid email or password'
@@ -1061,7 +1071,7 @@ def login(request):
             
             # Debug logging
             print(f"Company login attempt - Email match: {email_match}, Password match: {password_match}")
-            print(f"Company email: {company.email}, User email: {user_email}")
+            print(f"Company email: {company.email}, User email: {user_email_or_username}")
             print(f"Company password length: {len(company.password) if company.password else 0}, User password length: {len(user_password)}")
             
         except Exception as e:
@@ -1573,32 +1583,47 @@ def list_clients(request):
     elif request.method == 'POST':
         # Create a new customer
         try:
+            print("=" * 50)
+            print("CUSTOMER CREATE REQUEST RECEIVED")
+            print("=" * 50)
+            print(f"Request body: {request.body}")
+            
             data = json.loads(request.body)
+            print(f"Parsed data: {data}")
+            
             customer_name = data.get('customer_name', '').strip()
             company_name = data.get('company_name', '').strip() or None
             phone_number = data.get('phone_number', '').strip() or None
             email = data.get('email', '').strip()
             address = data.get('address', '').strip() or None
             
+            print(f"Customer Name: {customer_name}")
+            print(f"Email: {email}")
+            
             # Validation
             if not customer_name:
+                print("ERROR: Customer Name is required")
                 return JsonResponse({
                     'error': 'Customer Name is required'
                 }, status=400)
             
             if not email:
+                print("ERROR: Email is required")
                 return JsonResponse({
                     'error': 'Email is required'
                 }, status=400)
             
             # Check if email already exists
             if Client.objects.filter(email=email).exists():
+                print(f"ERROR: Email {email} already exists")
                 return JsonResponse({
                     'error': 'Customer with this email already exists'
                 }, status=400)
             
             # Get creator information from token
             creator_info = get_user_from_token(request)
+            print(f"Creator info: {creator_info}")
+            
             created_by_type = None
             created_by_user_id = None
             
@@ -1610,6 +1635,8 @@ def list_clients(request):
                 elif user_type == 'user':
                     created_by_type = 'user'
                     created_by_user_id = creator_info.get('user_id')
+            
+            print(f"Creating customer with: name={customer_name}, email={email}")
             
             # Create customer
             client = Client.objects.create(
@@ -1623,6 +1650,10 @@ def list_clients(request):
                 created_by_type=created_by_type,
                 created_by_user_id=created_by_user_id
             )
+            
+            print(f"✅ Customer created successfully! ID: {client.id}")
+            print(f"Total customers in DB: {Client.objects.count()}")
+            print("=" * 50)
             
             return JsonResponse({
                 'success': True,
@@ -1638,11 +1669,15 @@ def list_clients(request):
                 }
             }, status=201)
         
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            print(f"ERROR: Invalid JSON - {str(e)}")
             return JsonResponse({
                 'error': 'Invalid JSON in request body'
             }, status=400)
         except Exception as e:
+            print(f"ERROR: Exception occurred - {str(e)}")
+            import traceback
+            traceback.print_exc()
             return JsonResponse({
                 'error': f'Error creating client: {str(e)}'
             }, status=500)
