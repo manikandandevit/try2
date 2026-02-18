@@ -34,13 +34,10 @@ if RENDER_EXTERNAL_HOSTNAME:
     ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
 
 # CSRF Trusted Origins - Allow requests from frontend
-CSRF_TRUSTED_ORIGINS = [
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-]
-if RENDER_EXTERNAL_HOSTNAME:
-    CSRF_TRUSTED_ORIGINS.append(f'https://{RENDER_EXTERNAL_HOSTNAME}')
-
+# CSRF_TRUSTED_ORIGINS = [
+#     'http://localhost:5173',
+#     'http://127.0.0.1:5173',
+# ]
 
 # Application definition
 
@@ -251,11 +248,14 @@ CSRF_COOKIE_SECURE = True
 
 
 CORS_ALLOWED_ORIGINS = [
-    "https://try-p44k.vercel.app",
+    "https://try-nine-beige.vercel.app",
 ]
 
 CSRF_TRUSTED_ORIGINS = [
-    "https://try-p44k.vercel.app",
+    "https://try-nine-beige.vercel.app",
 ]
+if RENDER_EXTERNAL_HOSTNAME:
+    CSRF_TRUSTED_ORIGINS.append(f'https://{RENDER_EXTERNAL_HOSTNAME}')
+
 
 CORS_ALLOW_CREDENTIALS = True
