@@ -247,11 +247,11 @@ CSRF_COOKIE_SECURE = True
 
 
 CORS_ALLOWED_ORIGINS = [
-    "https://try-nine-beige.vercel.app",
+    "https://quot-eight.vercel.app",
 ]
 
 CSRF_TRUSTED_ORIGINS = [
-    "https://try-nine-beige.vercel.app",
+    "https://quot-eight.vercel.app",
     "https://try2-1-qdth.onrender.com"
 ]
 if RENDER_EXTERNAL_HOSTNAME:
