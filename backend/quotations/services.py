@@ -43,7 +43,42 @@ class IntentClassifier:
     @staticmethod
     def classify(user_message: str) -> str:
         """Classify user intent from message."""
-        user_lower = user_message.lower()
+        user_lower = user_message.lower().strip()
+        
+        # Check for casual conversation first (gratitude, compliments, greetings, endings)
+        # These should be detected before action intents
+        gratitude_patterns = [
+            r'\b(thanks|thank you|okthank|ok thanks|thx|ty|appreciate)\b',
+            r'^thanks?$',
+            r'^ok\s*thanks?$',
+            r'^thank\s*you$',
+        ]
+        compliment_patterns = [
+            r'\b(you are|you\'re)\s+(very\s+)?good\b',
+            r'\b(good|very good|excellent|well done|nice|great job|awesome|fantastic)\b',
+            r'^good$',
+            r'^very good$',
+        ]
+        greeting_patterns = [
+            r'^(hi|hello|hey)$',
+            r'\b(good morning|good afternoon|good evening)\b',
+        ]
+        ending_patterns = [
+            r'^(bye|goodbye|see you|see ya|cya|ttyl|talk to you later)$',
+            r'^(nope|no|nothing|nah|not really|not now)$',
+            r'^(ok|okay|alright|sure|fine|got it|understood)$',
+            r'^(that\'s all|that\'s it|done|finished|complete)$',
+        ]
+        
+        # Check if message is ONLY casual conversation (no action words)
+        action_words = ['add', 'create', 'remove', 'delete', 'change', 'edit', 'update', 'view', 'show', 'calculate', 'reset', 'clear', 'modify']
+        has_action = any(word in user_lower for word in action_words)
+        
+        # Check for casual conversation patterns
+        for pattern in gratitude_patterns + compliment_patterns + greeting_patterns + ending_patterns:
+            if re.search(pattern, user_lower, re.IGNORECASE):
+                if not has_action:  # Only return 'casual' if no action words present
+                    return 'casual'
         
         # Check each intent pattern
         for intent, patterns in IntentClassifier.INTENT_PATTERNS.items():
@@ -730,7 +765,40 @@ class OpenRouterService:
     
     def get_system_prompt(self) -> str:
         """Get the system prompt for SynQuot AI assistant."""
-        return """You are SynQuot, a professional AI Quotation Assistant.
+        return """You are SynQuot, an intelligent, professional AI Quotation Assistant with FAANG-level conversational intelligence.
+
+YOUR PERSONALITY & COMMUNICATION STYLE:
+- Be warm, professional, and genuinely helpful - like a trusted business advisor
+- Communicate naturally and conversationally, as if speaking to a colleague
+- Show empathy and understanding - acknowledge user needs before responding
+- Be proactive - anticipate needs and offer intelligent suggestions
+- Use context from the conversation history to provide personalized responses
+- Avoid robotic or template-like responses - each interaction should feel natural
+- When appropriate, add brief, relevant insights or suggestions (e.g., "This looks great! The total is competitive for this scope.")
+- Use natural transitions and conversational flow, not abrupt responses
+
+CONVERSATION INTELLIGENCE:
+- Remember context from earlier in the conversation
+- Reference previous services or decisions when relevant
+- Acknowledge user's progress: "Great! I've added that. Your quotation now has 3 services."
+- Provide helpful context: "I noticed you're building a comprehensive package - would you like me to suggest complementary services?"
+- When user makes changes, acknowledge them naturally: "Perfect! I've updated the price. The new total reflects this change."
+- If something seems unusual, gently confirm: "I've set the quantity to 5 - is that correct?"
+
+PROACTIVE INTELLIGENCE:
+- After adding services, briefly summarize what's been added
+- When totals change significantly, mention it naturally
+- If user adds multiple related services, acknowledge the pattern: "I see you're building a comprehensive digital solution!"
+- Suggest logical next steps when appropriate (but don't be pushy): "This looks great! Would you like to add anything else?"
+- Recognize when a quotation is nearly complete and offer to finalize: "Your quotation looks complete. Ready to download or share?"
+- Notice patterns: "I see you've added several web services - would you like me to suggest hosting or maintenance options?"
+
+CONTEXT AWARENESS & MEMORY:
+- Reference previous conversation naturally: "As we discussed earlier..." or "Building on what we added..."
+- Remember user preferences mentioned earlier (e.g., if they mentioned a budget range)
+- Acknowledge when user is building on previous work: "Great! Adding this to your existing services..."
+- If user repeats a request, acknowledge it: "I see you'd like to adjust that again - let me update it."
+- Connect related actions: "Perfect! This complements the [previous service] we added earlier."
 
 THIS IS A STRICT SYSTEM PROMPT.
 FOLLOW EVERY RULE WITHOUT EXCEPTION.
@@ -1075,19 +1143,89 @@ IMPORTANT: When parsing "remove X quantity Y price Z":
 - Use the service name to find and remove the matching service
 
 ----------------------------------
+GREETINGS & CASUAL CONVERSATION (CRITICAL - HUMAN-LIKE RESPONSES)
+----------------------------------
+When users greet you or make casual conversation:
+- Respond warmly and naturally: "Hello! I'm here to help you create a professional quotation. What would you like to add?"
+- If they say "hi", "hello", "thanks", "thank you", "okthank you", "ok thanks", etc., acknowledge it naturally
+- If they ask "how are you" or similar, respond briefly and redirect: "I'm doing great, thanks for asking! Ready to help you build your quotation."
+- After greetings, proactively offer help: "What service would you like to add to your quotation?"
+- Keep it brief but friendly - don't over-explain
+
+When users express gratitude (thank you, thanks, okthank you, etc.):
+- Respond warmly: "You're welcome! Happy to help." or "My pleasure! Is there anything else you'd like to add?"
+- Don't be overly formal - keep it natural
+- ALWAYS return the current quotation unchanged when responding to gratitude
+- Example responses:
+  * "You're welcome! Happy to help with your quotation."
+  * "My pleasure! Let me know if you need anything else."
+  * "Glad I could help! Your quotation is ready whenever you need it."
+
+When users give compliments ("you are very good", "good job", "well done", "nice", etc.):
+- Respond graciously and warmly: "Thank you so much! I'm glad I could help."
+- Acknowledge the compliment naturally: "That's very kind of you! I'm here whenever you need assistance."
+- ALWAYS return the current quotation unchanged
+- Don't be overly humble or dismissive - accept it warmly
+- Example responses:
+  * "Thank you! I really appreciate that. I'm here to help make your quotation process smooth."
+  * "That's so kind of you! I'm glad I could assist. Your quotation looks great!"
+  * "Thanks! I'm always here to help. Is there anything else you'd like to add or modify?"
+
+When users say farewells ("bye", "goodbye", "see you", etc.):
+- Respond warmly and naturally: "Goodbye! Feel free to come back anytime if you need help with your quotation. Have a great day!"
+- Keep it brief and friendly
+- ALWAYS return the current quotation unchanged
+- Example responses:
+  * "Goodbye! Have a great day!"
+  * "See you later! Your quotation is saved and ready when you need it."
+  * "Take care! Come back anytime you need help."
+
+When users say negative responses ("nope", "no", "nothing", "nah", "not really", "that's all", "done"):
+- Respond naturally: "No problem! I'm here whenever you need help with your quotation. Just let me know!"
+- Don't push or ask for clarification - just acknowledge
+- ALWAYS return the current quotation unchanged
+- Example responses:
+  * "No problem! I'm here whenever you need help."
+  * "That's fine! Let me know if you need anything else."
+  * "Got it! Your quotation is ready whenever you need it."
+
+When users acknowledge ("ok", "okay", "alright", "got it", "sure", "fine"):
+- Respond briefly: "Got it! Let me know if you need anything else with your quotation."
+- Keep it short and friendly
+- ALWAYS return the current quotation unchanged
+
+CASUAL CONVERSATION DETECTION (CRITICAL):
+- Recognize these as casual conversation, NOT errors:
+  * Gratitude: "thanks", "thank you", "okthank you", "ok thanks", "thx", "ty"
+  * Compliments: "good", "very good", "excellent", "well done", "nice", "great job", "you are good", "you are very good"
+  * Greetings: "hi", "hello", "hey", "good morning", "good afternoon", "good evening"
+  * Farewells: "bye", "goodbye", "see you", "see ya", "cya", "ttyl"
+  * Negative: "nope", "no", "nothing", "nah", "not really", "that's all", "done", "finished"
+  * Acknowledgments: "ok", "okay", "alright", "sure", "yeah", "yep", "cool", "got it", "understood"
+- For ALL casual conversation, return current quotation unchanged
+- Respond naturally and warmly - NEVER show error messages for casual conversation
+- NEVER ask for clarification on casual conversation - just respond naturally like a human would
+- Keep responses brief, friendly, and human-like
+
+----------------------------------
 INVALID PARSE RULE
 ----------------------------------
 If the instruction cannot be parsed clearly:
 - Do NOT change quotation
 - Return current quotation unchanged
-- Respond with a helpful clarification question
+- Respond with a helpful, conversational clarification question
+- Example: "I want to make sure I understand correctly - are you looking to add a service, or modify an existing one?"
 
 ----------------------------------
-QUESTION RULE
+CONVERSATION & QUESTION RULES
 ----------------------------------
-Ask a question ONLY if required data is missing.
-Never repeat already provided information.
-Keep questions short and specific.
+- Ask questions ONLY if required data is missing
+- Never repeat already provided information
+- Keep questions short, specific, and conversational
+- Frame questions naturally: "What quantity would you like?" not "Please provide quantity"
+- When asking for clarification, be helpful: "I see you mentioned 'website' - are you looking for a basic site or something more comprehensive?"
+- After completing an action, confirm naturally: "Done! I've added [service] to your quotation."
+- Use positive reinforcement: "Excellent choice!" or "That's a great addition to your quotation."
 
 ----------------------------------
 BUSINESS RULES
@@ -1102,8 +1240,10 @@ FAIL-SAFE RULE
 ----------------------------------
 If user instruction is unclear:
 - Return current quotation unchanged
-- Ask ONE clear clarification question
+- Ask ONE clear, conversational clarification question
 - Do NOT guess or make assumptions
+- Frame questions helpfully: "I want to make sure I get this right - [question]?" rather than "Please clarify"
+- Show you're trying to understand: "Just to confirm, are you looking to [interpretation]?"
 
 ----------------------------------
 JSON VALIDATION
@@ -1116,11 +1256,26 @@ Before returning:
 5. Ensure amounts are calculated correctly
 
 ----------------------------------
+MESSAGE TONE EXAMPLES
+----------------------------------
+GOOD (Natural, Intelligent):
+- "Perfect! I've added Web Development to your quotation. Based on your previous services, this creates a comprehensive digital solution. The total is now ₹75,000."
+- "I've updated the quantity to 5 units. This increases the total to ₹25,000 - does that work for your budget?"
+- "Great progress! You now have 3 services totaling ₹50,000. Would you like to add anything else, or should we finalize this quotation?"
+
+AVOID (Robotic, Template-like):
+- "Service added successfully."
+- "Quantity updated."
+- "Quotation updated."
+
+----------------------------------
 REMEMBER
 ----------------------------------
 If the preview is wrong, YOU are wrong.
 Your JSON is the single source of truth.
-ALWAYS return valid JSON that matches the exact format above."""
+ALWAYS return valid JSON that matches the exact format above.
+
+Be intelligent, be human, be helpful. Make every interaction feel natural and valuable."""
     
     def chat_completion(self, messages: list, model_override: Optional[str] = None) -> Optional[str]:
         """Send chat completion request to OpenRouter API with automatic fallback."""
@@ -1404,32 +1559,66 @@ ALWAYS return valid JSON that matches the exact format above."""
         """Get enhanced system prompt based on user intent."""
         base_prompt = self.get_system_prompt()
         
-        # Add intent-specific guidance
+        # Add intent-specific guidance with intelligent, conversational context
         intent_guidance = {
             'add': "\n\nCURRENT INTENT: User wants to ADD a service.\n"
-                   "- If quantity and price are provided, use those values.\n"
-                   "- If quantity or price is missing, add service with quantity=0, unit_price=0.\n"
-                   "- User can modify these values later. Always add the service if service name is clear.",
-            'remove': "\n\nCURRENT INTENT: User wants to REMOVE a service. Use fuzzy matching to find the service name.",
-            'change': "\n\nCURRENT INTENT: User wants to CHANGE/UPDATE something. Only modify the specified field.",
-            'view': "\n\nCURRENT INTENT: User wants to VIEW the quotation. Return current quotation without modifications.",
-            'calculate': "\n\nCURRENT INTENT: User wants to CALCULATE totals. Ensure all calculations are correct.",
-            'reset': "\n\nCURRENT INTENT: User wants to RESET the quotation. Return empty quotation structure.",
+                   "- Respond enthusiastically and confirm the addition naturally\n"
+                   "- If quantity and price are provided, use those values and acknowledge them\n"
+                   "- If quantity or price is missing, add service with quantity=0, unit_price=0\n"
+                   "- Mention the new total or how this affects the quotation\n"
+                   "- User can modify these values later. Always add the service if service name is clear\n"
+                   "- Example good response: 'Perfect! I've added [service] to your quotation. [Context about total/impact].'",
+            'remove': "\n\nCURRENT INTENT: User wants to REMOVE a service.\n"
+                     "- Acknowledge the removal naturally: 'I've removed [service] from your quotation.'\n"
+                     "- Use fuzzy matching to find the service name\n"
+                     "- Mention how this affects the total if significant\n"
+                     "- Example: 'Done! I've removed [service]. Your new total is ₹X.'",
+            'change': "\n\nCURRENT INTENT: User wants to CHANGE/UPDATE something.\n"
+                     "- Acknowledge the change: 'I've updated [what changed] for you.'\n"
+                     "- Only modify the specified field\n"
+                     "- Confirm the impact: 'The new total is ₹X' or 'This changes your [field] to [value]'\n"
+                     "- Example: 'Perfect! I've updated the price to ₹25,000. The new total is ₹30,000.'",
+            'view': "\n\nCURRENT INTENT: User wants to VIEW the quotation.\n"
+                   "- Provide a friendly summary, not just data\n"
+                   "- Return current quotation without modifications\n"
+                   "- Example: 'Here's your current quotation: [X] services totaling ₹Y. [Brief summary if helpful]'",
+            'calculate': "\n\nCURRENT INTENT: User wants to CALCULATE totals.\n"
+                        "- Ensure all calculations are correct\n"
+                        "- Present totals clearly and naturally\n"
+                        "- Example: 'Your quotation totals ₹X (Subtotal: ₹Y, GST: ₹Z, Shipping: ₹W)'",
+            'reset': "\n\nCURRENT INTENT: User wants to RESET the quotation.\n"
+                    "- Acknowledge the reset: 'I've cleared your quotation. Ready to start fresh!' or 'Quotation reset. What would you like to add first?'\n"
+                    "- Return empty quotation structure\n"
+                    "- Be encouraging about starting new",
+            'casual': "\n\nCURRENT INTENT: User is making casual conversation (gratitude, compliments, greetings, endings, acknowledgments).\n"
+                     "- Respond warmly and naturally - be human-like, not robotic\n"
+                     "- Return current quotation UNCHANGED\n"
+                     "- For gratitude: 'You're welcome! Happy to help.'\n"
+                     "- For compliments: 'Thank you so much! I'm glad I could help.'\n"
+                     "- For greetings: 'Hello! I'm here to help you create a professional quotation.'\n"
+                     "- For farewells (bye, goodbye): 'Goodbye! Feel free to come back anytime. Have a great day!'\n"
+                     "- For negative responses (nope, no, nothing): 'No problem! I'm here whenever you need help.'\n"
+                     "- For acknowledgments (ok, got it): 'Got it! Let me know if you need anything else.'\n"
+                     "- NEVER ask for clarification on casual conversation - just respond naturally\n"
+                     "- NEVER show error messages for casual conversation\n"
+                     "- Keep responses brief and friendly",
         }
         
         guidance = intent_guidance.get(intent, "")
         
-        # Add entity hints if available
+        # Add entity hints if available with intelligent context
         entity_hints = []
         if entities.get('service_name'):
-            entity_hints.append(f"Service name mentioned: {entities['service_name']}")
+            entity_hints.append(f"Service name mentioned: '{entities['service_name']}'")
         if entities.get('quantity'):
-            entity_hints.append(f"Quantity mentioned: {entities['quantity']}")
+            entity_hints.append(f"Quantity mentioned: {entities['quantity']} units")
         if entities.get('price'):
-            entity_hints.append(f"Price mentioned: ₹{entities['price']}")
+            entity_hints.append(f"Price mentioned: ₹{entities['price']:,.2f}")
         
         if entity_hints:
-            guidance += "\n\nEXTRACTED ENTITIES: " + ", ".join(entity_hints)
+            guidance += "\n\nEXTRACTED ENTITIES (use these naturally in your response): " + ", ".join(entity_hints)
+            guidance += "\n- Incorporate these details into your conversational response naturally"
+            guidance += "\n- Don't just list them - use them contextually in your message"
         
         return base_prompt + guidance
     
@@ -1716,8 +1905,42 @@ Current quotation JSON:
             current_quotation = QuotationManager.initialize_quotation()
             return "I've reset the quotation. You can now start adding new services.", current_quotation
         
-        # Generic fallback
-        return "I'm having trouble processing your request. Could you please rephrase it? For example: 'Add service [name] with quantity [number] and price [amount]'.", current_quotation
+        # Handle casual conversation (gratitude, compliments, greetings, endings)
+        message_lower = user_message.lower().strip()
+        gratitude_words = ['thanks', 'thank you', 'okthank', 'ok thanks', 'thx', 'ty', 'appreciate']
+        compliment_words = ['good', 'very good', 'excellent', 'well done', 'nice', 'great job', 'you are good', 'you are very good', 'awesome', 'fantastic']
+        greeting_words = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening']
+        ending_words = ['bye', 'goodbye', 'see you', 'see ya', 'cya', 'ttyl', 'talk to you later']
+        negative_words = ['nope', 'no', 'nothing', 'nah', 'not really', 'not now', "that's all", "that's it", 'done', 'finished', 'complete']
+        acknowledgment_words = ['ok', 'okay', 'alright', 'sure', 'fine', 'got it', 'understood']
+        
+        # Handle gratitude
+        if any(word in message_lower for word in gratitude_words):
+            return "You're welcome! Happy to help with your quotation. Is there anything else you'd like to add or modify?", current_quotation
+        
+        # Handle compliments
+        if any(word in message_lower for word in compliment_words):
+            return "Thank you so much! I'm glad I could help. Your quotation looks great! Let me know if you need anything else.", current_quotation
+        
+        # Handle greetings
+        if any(word in message_lower for word in greeting_words):
+            return "Hello! I'm here to help you create a professional quotation. What would you like to add?", current_quotation
+        
+        # Handle farewells/endings
+        if any(word in message_lower for word in ending_words):
+            return "Goodbye! Feel free to come back anytime if you need help with your quotation. Have a great day!", current_quotation
+        
+        # Handle negative responses (nope, no, nothing)
+        if any(word in message_lower for word in negative_words):
+            return "No problem! I'm here whenever you need help with your quotation. Just let me know!", current_quotation
+        
+        # Handle acknowledgments (ok, okay, got it)
+        if any(word in message_lower for word in acknowledgment_words):
+            return "Got it! Let me know if you need anything else with your quotation.", current_quotation
+        
+        # Generic fallback - only for truly unclear requests (very rare)
+        # Make it more friendly and less robotic
+        return "I'm here to help! You can add services, modify your quotation, or view what you have. What would you like to do?", current_quotation
     
     def process_user_message(
         self, 
@@ -1746,6 +1969,10 @@ Current quotation JSON:
         # Classify intent and extract entities
         intent = IntentClassifier.classify(user_message)
         entities = IntentClassifier.extract_entities(user_message)
+        
+        # Handle casual conversation early (gratitude, compliments, greetings)
+        if intent == 'casual':
+            return self._fallback_processing(user_message, current_quotation)
         
         # If user is adding a service, check past conversations for pricing suggestions
         pricing_suggestion = None

@@ -443,7 +443,31 @@ def chat(request):
             conversation_history = request.session.get(session_keys['conversation_history'], [])
             current_quotation = request.session.get(session_keys['quotation'], None)
             if current_quotation is None:
-                current_quotation = QuotationManager.initialize_quotation()
+                # Try to get last quotation from database for this user
+                user_info = get_user_from_token(request)
+                if user_info:
+                    user_type = user_info.get('user_type', 'company')
+                    user_id = user_info.get('user_id')
+                    
+                    if user_type == 'user' and user_id:
+                        last_quotation = Quotation.objects.filter(
+                            quotation_data__created_by_user_id=user_id
+                        ).order_by('-updated_at').first()
+                    else:
+                        last_quotation = Quotation.objects.filter(
+                            quotation_data__created_by_type='company'
+                        ).order_by('-updated_at').first()
+                    
+                    if last_quotation:
+                        qdata = last_quotation.quotation_data or {}
+                        current_quotation = dict(qdata)
+                        current_quotation['id'] = last_quotation.id
+                        current_quotation['quotation_number'] = last_quotation.quotation_number
+                        conversation_history = qdata.get('conversation_history', []) or []
+                    else:
+                        current_quotation = QuotationManager.initialize_quotation()
+                else:
+                    current_quotation = QuotationManager.initialize_quotation()
         
         existing_quotation_number = current_quotation.get('quotation_number')
         if len(conversation_history) <= 1 and not current_quotation.get('id'):
@@ -470,6 +494,19 @@ def chat(request):
                 updated_quotation['quotation_number'] = existing_quotation_number
             if "issue" not in message.lower() and "error" not in message.lower():
                 message = message + " (Note: Some quotation data was invalid and has been corrected.)"
+        
+        # Format success message when quotation is created with services
+        updated_services = updated_quotation.get('services', [])
+        current_services = current_quotation.get('services', [])
+        if updated_services and len(updated_services) > 0:
+            # Check if services were just added (new quotation or services increased)
+            if not current_services or len(updated_services) > len(current_services):
+                grand_total = updated_quotation.get('grand_total', 0) or 0
+                service_count = len(updated_services)
+                # Format the message with service count and total (remove .00 if present)
+                total_str = f"{grand_total:,.2f}".replace('.00', '')
+                message = f"I've created a quotation based on your scenario with {service_count} service{'s' if service_count != 1 else ''}. Total: ₹{total_str}"
+        
         # Do NOT auto-generate quotation_number here - only generate when actually creating a new quote in database
         # updated_quotation = ensure_quotation_number(updated_quotation)
         
@@ -505,6 +542,63 @@ def chat(request):
             except (Quotation.DoesNotExist, ValueError):
                 pass
         
+        # Auto-save quotation to database if user is authenticated and quotation has services
+        # This ensures quotation persists across logout/login
+        if not quotation_id and updated_quotation.get('services') and len(updated_quotation.get('services', [])) > 0:
+            user_info = get_user_from_token(request)
+            if user_info:
+                try:
+                    # Check if quotation already exists in DB (by checking if id exists)
+                    if not updated_quotation.get('id'):
+                        # Create new quotation in database
+                        user_type = user_info.get('user_type', 'company')
+                        user_id = user_info.get('user_id')
+                        
+                        # Set created_by fields
+                        if user_type == 'user' and user_id:
+                            updated_quotation['created_by_type'] = 'user'
+                            updated_quotation['created_by_user_id'] = user_id
+                        else:
+                            updated_quotation['created_by_type'] = 'company'
+                            updated_quotation['created_by_user_id'] = None
+                        
+                        # Track who updated
+                        updated_quotation['updated_by_type'] = user_type
+                        updated_quotation['updated_by_user_id'] = user_id if user_type == 'user' else None
+                        
+                        updated_quotation['conversation_history'] = conversation_history
+                        
+                        quotation_obj = Quotation.objects.create(
+                            quotation_data=updated_quotation
+                        )
+                        updated_quotation['id'] = quotation_obj.id
+                        updated_quotation['quotation_number'] = quotation_obj.quotation_number
+                    else:
+                        # Update existing quotation
+                        quotation_obj = Quotation.objects.get(id=updated_quotation['id'])
+                        qdata = dict(quotation_obj.quotation_data or {})
+                        for k, v in updated_quotation.items():
+                            if k not in ('id', 'created_at', 'updated_at', 'conversation_history'):
+                                qdata[k] = v
+                        qdata['conversation_history'] = conversation_history
+                        
+                        # Track who updated
+                        user_type = user_info.get('user_type', 'company')
+                        user_id = user_info.get('user_id')
+                        if user_type == 'user' and user_id:
+                            qdata['updated_by_type'] = 'user'
+                            qdata['updated_by_user_id'] = user_id
+                        else:
+                            qdata['updated_by_type'] = 'company'
+                            qdata['updated_by_user_id'] = None
+                        
+                        quotation_obj.quotation_data = qdata
+                        quotation_obj.save()
+                        updated_quotation['quotation_number'] = quotation_obj.quotation_number
+                except Exception as e:
+                    # If DB save fails, continue with session storage
+                    print(f"Auto-save quotation failed: {e}")
+        
         request.session[session_keys['quotation']] = updated_quotation
         request.session[session_keys['conversation_history']] = conversation_history[-20:]
         
@@ -522,10 +616,39 @@ def chat(request):
 
 @require_http_methods(["GET"])
 def get_quotation(request):
-    """Get current quotation from session."""
+    """Get current quotation from session, or last quotation from database if session is empty."""
+    from .models import Quotation
     session_keys = get_session_keys_for_request(request)
     migrate_legacy_session_for_request(request, session_keys)
-    quotation = request.session.get(session_keys['quotation'], QuotationManager.initialize_quotation())
+    quotation = request.session.get(session_keys['quotation'], None)
+    
+    # If session is empty, try to get last quotation from database for this user
+    if not quotation or (not quotation.get('services') or len(quotation.get('services', [])) == 0):
+        user_info = get_user_from_token(request)
+        if user_info:
+            user_type = user_info.get('user_type', 'company')
+            user_id = user_info.get('user_id')
+            
+            if user_type == 'user' and user_id:
+                last_quotation = Quotation.objects.filter(
+                    quotation_data__created_by_user_id=user_id
+                ).order_by('-updated_at').first()
+            else:
+                last_quotation = Quotation.objects.filter(
+                    quotation_data__created_by_type='company'
+                ).order_by('-updated_at').first()
+            
+            if last_quotation:
+                qdata = last_quotation.quotation_data or {}
+                quotation = dict(qdata)
+                quotation['id'] = last_quotation.id
+                quotation['quotation_number'] = last_quotation.quotation_number
+                # Update session with this quotation
+                request.session[session_keys['quotation']] = quotation
+            else:
+                quotation = QuotationManager.initialize_quotation()
+        else:
+            quotation = QuotationManager.initialize_quotation()
     
     # Do NOT auto-generate quotation_number here - only generate when actually creating a new quote in database
     # quotation = ensure_quotation_number(quotation)
