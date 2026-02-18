@@ -2,8 +2,8 @@
 Django settings for SynQuot project.
 """
 
-from pathlib import Path
 import os
+from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -51,6 +51,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -132,8 +133,11 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.0/howto/static-files/
 
-STATIC_URL = 'static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles'
+# STATIC_URL = 'static/'
+# STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+STATIC_URL = '/static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 # Only include static directory if it exists
 STATICFILES_DIRS = []
 static_dir = FRONTEND_DIR / 'static'
@@ -189,13 +193,26 @@ CACHES = {
 }
 
 # CORS configuration for frontend (Vite React app on port 5173)
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+# CORS_ALLOWED_ORIGINS = [
+#     "http://localhost:5174",
+#     "http://127.0.0.1:5174",
+# ]
 
 # Allow all origins in development (more permissive)
-CORS_ALLOW_ALL_ORIGINS = True  # For development only
+# CORS_ALLOW_ALL_ORIGINS = True  # For development only
+
+# CORS_ALLOWED_ORIGINS = [
+#     "https://synquote-frontend.vercel.app",
+# ]
+# CSRF_TRUSTED_ORIGINS = [
+#     "https://synquote-frontend.vercel.app",
+#     "https://lovably-landed-payton.ngrok-free.dev",
+# ]
+
+
+CORS_ALLOW_CREDENTIALS = True
+
+
 
 # Allow cookies/authorization headers to be sent from the frontend if needed
 CORS_ALLOW_CREDENTIALS = True
@@ -212,3 +229,8 @@ CORS_ALLOW_HEADERS = [
     'x-csrftoken',
     'x-requested-with',
 ]
+
+SESSION_COOKIE_SAMESITE = "None"
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SAMESITE = "None"
+CSRF_COOKIE_SECURE = True
