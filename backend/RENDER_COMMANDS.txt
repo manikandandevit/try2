@@ -1,0 +1,16 @@
+# Render Dashboard - Copy These Commands
+
+## Build Command:
+chmod +x build.sh && ./build.sh
+
+## Start Command:
+gunicorn kattappa.wsgi:application --bind 0.0.0.0:$PORT
+
+## Root Directory:
+backend
+
+## Environment Variables:
+SECRET_KEY=p4#o3p-2+2vz_o_gl6iu=o9qf(xal#mn%b3i=1fz#mz6^1=0#*
+DEBUG=False
+DATABASE_URL=<Your Database Internal URL>
+
