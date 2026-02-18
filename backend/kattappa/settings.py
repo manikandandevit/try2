@@ -28,8 +28,8 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-synquot-ai-quotation-
 DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
 
 # Get Render URL from environment variable
-RENDER_EXTERNAL_HOSTNAME = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'try2-1-qdth.onrender.com')
-ALLOWED_HOSTS = ['*', 'try2-1-qdth.onrender.com']
+RENDER_EXTERNAL_HOSTNAME = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'try2-2-mpi9.onrender.com')
+ALLOWED_HOSTS = ['*', 'try2-2-mpi9.onrender.com']
 if RENDER_EXTERNAL_HOSTNAME:
     ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
 
@@ -252,7 +252,7 @@ CORS_ALLOWED_ORIGINS = [
 
 CSRF_TRUSTED_ORIGINS = [
     "https://quot-eight.vercel.app",
-    "https://try2-1-qdth.onrender.com"
+    "https://try2-2-mpi9.onrender.com"
 ]
 if RENDER_EXTERNAL_HOSTNAME:
     CSRF_TRUSTED_ORIGINS.append(f'https://{RENDER_EXTERNAL_HOSTNAME}')
