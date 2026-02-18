@@ -56,6 +56,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware', 
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -223,12 +224,12 @@ CACHES = {
 # ]
 
 
-CORS_ALLOW_CREDENTIALS = True
+# CORS_ALLOW_CREDENTIALS = True
 
 
 
-# Allow cookies/authorization headers to be sent from the frontend if needed
-CORS_ALLOW_CREDENTIALS = True
+# # Allow cookies/authorization headers to be sent from the frontend if needed
+# CORS_ALLOW_CREDENTIALS = True
 
 # CORS headers
 CORS_ALLOW_HEADERS = [
@@ -249,3 +250,12 @@ CSRF_COOKIE_SAMESITE = "None"
 CSRF_COOKIE_SECURE = True
 
 
+CORS_ALLOWED_ORIGINS = [
+    "https://try-p44k.vercel.app",
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://try-p44k.vercel.app",
+]
+
+CORS_ALLOW_CREDENTIALS = True
