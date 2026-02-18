@@ -629,14 +629,36 @@ def get_quotation(request):
             user_type = user_info.get('user_type', 'company')
             user_id = user_info.get('user_id')
             
+            last_quotation = None
+            
             if user_type == 'user' and user_id:
+                # Regular user: try filtering by created_by_user_id first
                 last_quotation = Quotation.objects.filter(
                     quotation_data__created_by_user_id=user_id
                 ).order_by('-updated_at').first()
+                
+                # If no quotation found, also check updated_by_user_id
+                if not last_quotation:
+                    last_quotation = Quotation.objects.filter(
+                        quotation_data__updated_by_user_id=user_id
+                    ).order_by('-updated_at').first()
             else:
+                # Company admin: try filtering by created_by_type='company' first
                 last_quotation = Quotation.objects.filter(
                     quotation_data__created_by_type='company'
                 ).order_by('-updated_at').first()
+                
+                # If no quotation found, also check updated_by_type='company'
+                if not last_quotation:
+                    last_quotation = Quotation.objects.filter(
+                        quotation_data__updated_by_type='company'
+                    ).order_by('-updated_at').first()
+                
+                # If still no quotation found, check for legacy company quotations
+                if not last_quotation:
+                    last_quotation = Quotation.objects.filter(
+                        quotation_data__created_by_user_id__isnull=True
+                    ).order_by('-updated_at').first()
             
             if last_quotation:
                 qdata = last_quotation.quotation_data or {}
@@ -701,31 +723,67 @@ def get_last_quotation_id(request):
     try:
         user_info = get_user_from_token(request)
         if not user_info:
-            return JsonResponse({'success': True, 'last_quotation_id': None})
+            return JsonResponse({
+                'success': True,
+                'data': {
+                    'last_quotation_id': None
+                }
+            })
 
         user_type = user_info.get('user_type', 'company')
         user_id = user_info.get('user_id')
 
+        q = None
+        
         if user_type == 'user' and user_id:
             # Regular user: only return quotations created by this user
+            # Try filtering by created_by_user_id first (for new quotations)
             q = Quotation.objects.filter(
                 quotation_data__created_by_user_id=user_id
             ).order_by('-updated_at').first()
+            
+            # If no quotation found with created_by_user_id, also check updated_by_user_id
+            # This handles cases where quotation was created before the field was added
+            if not q:
+                q = Quotation.objects.filter(
+                    quotation_data__updated_by_user_id=user_id
+                ).order_by('-updated_at').first()
         else:
             # Company admin: only return quotations created by company admin
-            # Do NOT fallback to any quotation - admin should only see their own quotations
+            # Try filtering by created_by_type='company' first
             q = Quotation.objects.filter(
                 quotation_data__created_by_type='company'
             ).order_by('-updated_at').first()
+            
+            # If no quotation found, also check updated_by_type='company'
+            # This handles cases where quotation was created before the field was added
+            if not q:
+                q = Quotation.objects.filter(
+                    quotation_data__updated_by_type='company'
+                ).order_by('-updated_at').first()
+            
+            # If still no quotation found and user_id is None (company admin),
+            # check for quotations where created_by_user_id is None (legacy company quotations)
+            if not q:
+                q = Quotation.objects.filter(
+                    quotation_data__created_by_user_id__isnull=True
+                ).order_by('-updated_at').first()
 
         return JsonResponse({
             'success': True,
-            'last_quotation_id': q.id if q else None
+            'data': {
+                'last_quotation_id': q.id if q else None
+            }
         })
     except Exception as e:
+        import traceback
+        print(f"Error in get_last_quotation_id: {str(e)}")
+        print(traceback.format_exc())
         return JsonResponse({
             'success': True,
-            'last_quotation_id': None
+            'data': {
+                'last_quotation_id': None
+            }
         })
 
 
